@@ -1,0 +1,43 @@
+name: qq_restapi # 插件唯一识别名
+display_name: QQ REST API 核心适配器 # 用于展示的名字
+desc: QQ 官方 REST API 平台核心适配器，不依赖 botpy，直接使用 HTTP 调用官方接口 # 插件简短描述
+version: v0.1.0 # 插件版本号
+author: YourName # 作者
+repo: # 插件的仓库地址（待填写）
+default_config_tmpl:
+  appid: your_appid # QQ 机器人 AppID
+  secret: your_secret # QQ 机器人密钥
+  intent_mask: null # Intents 掩码（留空使用默认）
+  use_union_id_for_group: false # 群聊/单聊是否优先使用 Union OpenID
+  use_union_id_for_channel: false # 频道场景是否优先使用 Union OpenID
+  markdown_aj_template_id: "" # AJ 万能模板 ID（可空）
+  markdown_aj_keys: "" # AJ 万能模板参数键名（逗号分隔，可空）
+  image_bed_channel_id: "" # QQ 图床子频道 ID（可空）
+  bilibili_image_bed_config: {} # B 站图床配置（可空）
+  bot_api_base_url: "" # private_bot 业务后端 API 地址（可空）
+  group_add_robot_message: "欢迎加入，本机器人已入群～" # 入群欢迎消息（为空则不发送）
+  friend_add_message: "你好，我是小万，欢迎添加好友～" # 好友添加欢迎消息（为空则不发送）
+  new_user_welcome_message: "欢迎第一次和我聊天～" # 首次对话欢迎消息（为空则不发送）
+  enable_group_remove_notice: false # 退群提示开关
+  enable_friend_remove_notice: false # 删好友提示开关
+  unified_webhook_mode: true # 统一 Webhook 入口模式
+  webhook_uuid: "" # Webhook UUID（自动生成）
+
+config_docs:
+  appid: "QQ 机器人 AppID"
+  secret: "QQ 机器人密钥"
+  intent_mask: "Intents 掩码，留空使用默认"
+  use_union_id_for_group: "群聊/单聊是否优先使用 Union OpenID"
+  use_union_id_for_channel: "频道场景是否优先使用 Union OpenID"
+  markdown_aj_template_id: "AJ 万能模板 ID（可空）"
+  markdown_aj_keys: "AJ 万能模板参数键名（逗号分隔，可空）"
+  image_bed_channel_id: "QQ 图床子频道 ID（可空）"
+  bilibili_image_bed_config: "B 站图床配置（可空）"
+  bot_api_base_url: "private_bot 业务后端 API 地址（可空）"
+  group_add_robot_message: "入群欢迎消息（为空则不发送）"
+  friend_add_message: "好友添加欢迎消息（为空则不发送）"
+  new_user_welcome_message: "首次对话欢迎消息（为空则不发送）"
+  enable_group_remove_notice: "退群提示开关"
+  enable_friend_remove_notice: "删好友提示开关"
+  unified_webhook_mode: "统一 Webhook 入口模式"
+  webhook_uuid: "Webhook UUID（自动生成）"

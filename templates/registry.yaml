@@ -1,0 +1,44 @@
+version: 1
+
+templates: {}
+
+auto_events:
+  group_add_robot:
+    enabled: true
+    template: ""
+    fallback_text: "欢迎加入，本机器人已入群～"
+    log: true
+
+  group_del_robot:
+    enabled: false
+    template: ""
+    fallback_text: "机器人已退出群聊。"
+    log: true
+
+  friend_add:
+    enabled: true
+    template: ""
+    fallback_text: "你好，我是小万，欢迎添加好友～"
+    log: true
+
+  friend_del:
+    enabled: false
+    template: ""
+    fallback_text: "已解除好友关系。"
+    log: true
+
+  new_user_welcome:
+    enabled: true
+    template: ""
+    fallback_text: "欢迎第一次和我聊天～"
+    log: true
+    scenes:
+      - group
+
+auto_event_log_groups:
+  reaction:
+    log: true
+  audit:
+    log: true
+  forum:
+    log: true

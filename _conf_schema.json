@@ -1,0 +1,128 @@
+{
+  "use_union_id_for_group": {
+    "description": "群聊/单聊优先使用 Union OpenID",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后群聊/单聊场景优先记录 Union OpenID"
+  },
+  "use_union_id_for_channel": {
+    "description": "频道场景优先使用 Union OpenID",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后频道讨论组/私信优先记录 Union OpenID"
+  },
+  "markdown_aj_template_id": {
+    "description": "AJ 万能模板 ID",
+    "type": "string",
+    "default": "",
+    "hint": "用于 reply_markdown_aj 的默认模板 ID"
+  },
+  "markdown_aj_keys": {
+    "description": "AJ 万能模板参数键名",
+    "type": "string",
+    "default": "",
+    "hint": "逗号分隔，例如 title,desc,link"
+  },
+  "image_bed_channel_id": {
+    "description": "QQ 图床子频道 ID",
+    "type": "string",
+    "default": "",
+    "hint": "用于 uploadToQQBotImageBed"
+  },
+  "bilibili_image_bed_config": {
+    "description": "B 站图床配置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 B 站图床",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭后不会上传到 B 站图床"
+      },
+      "csrf_token": {
+        "description": "bili_jct",
+        "type": "string",
+        "default": "",
+        "hint": "从浏览器 Cookie 中获取"
+      },
+      "sessdata": {
+        "description": "SESSDATA",
+        "type": "string",
+        "default": "",
+        "hint": "从浏览器 Cookie 中获取"
+      },
+      "bucket": {
+        "description": "图床 bucket",
+        "type": "string",
+        "default": "openplatform",
+        "hint": "默认 openplatform"
+      }
+    }
+  },
+  "bot_api_base_url": {
+    "description": "后端 Bot API 基础地址",
+    "type": "string",
+    "default": "",
+    "hint": "private_bot 命令使用，例如 https://api.example.com，留空则禁用留言/树洞功能"
+  },
+  "debug_event_log": {
+    "description": "事件调试日志",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后输出原始事件和解析结果"
+  },
+  "group_add_robot_message": {
+    "description": "入群欢迎消息",
+    "type": "string",
+    "default": "欢迎加入，本机器人已入群～",
+    "hint": "为空则不发送"
+  },
+  "friend_add_message": {
+    "description": "好友添加欢迎消息",
+    "type": "string",
+    "default": "你好，我是小万，欢迎添加好友～",
+    "hint": "为空则不发送"
+  },
+  "new_user_welcome_message": {
+    "description": "首次对话欢迎消息",
+    "type": "string",
+    "default": "欢迎第一次和我聊天～",
+    "hint": "为空则不发送"
+  },
+  "enable_group_remove_notice": {
+    "description": "退群提示开关",
+    "type": "bool",
+    "default": false,
+    "hint": "控制 group_del_robot 自动回复"
+  },
+  "enable_friend_remove_notice": {
+    "description": "删好友提示开关",
+    "type": "bool",
+    "default": false,
+    "hint": "控制 friend_del 自动回复"
+  },
+  "auto_event_log_groups": {
+    "description": "自动事件日志分组开关",
+    "type": "object",
+    "items": {
+      "reaction": {
+        "description": "表态事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出表态事件日志"
+      },
+      "audit": {
+        "description": "审核事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出审核事件日志"
+      },
+      "forum": {
+        "description": "论坛事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出论坛事件日志"
+      }
+    }
+  }
+}
