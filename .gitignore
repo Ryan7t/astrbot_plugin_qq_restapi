@@ -204,5 +204,6 @@ latest.txt
 
 # Marimo
 marimo/_static/
-marimo/_lsp/
+marimo/_lsp/ 
 __marimo__/
+.claude/*
