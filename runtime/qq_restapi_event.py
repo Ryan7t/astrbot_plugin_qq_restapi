@@ -6,7 +6,7 @@ import time
 from typing import Any, Sequence
 
 from astrbot import logger
-from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.event import AstrMessageEvent, MessageChain, ResultContentType
 from astrbot.api.message_components import At, Image, Plain, Record, Video
 from astrbot.core.utils.io import download_image_by_url
 from astrbot.core.utils.tencent_record_helper import audio_to_tencent_silk_base64
@@ -23,7 +23,7 @@ from .message_parser import (
     GROUP_MESSAGE,
     INTERACTION,
 )
-from .sender import QQRestAPISender
+from .sender import QQRestAPISender, SendResult
 from .context import get_context
 from .httpx_pool import get_async_client, get_sync_client
 from .last_message_cache import set_last_message_id
@@ -46,6 +46,183 @@ _MSG_TYPES_NEED_MSG_ID = {
 _MSG_TYPES_NEED_EVENT_ID = {INTERACTION, GROUP_ADD_ROBOT}
 _MSG_TYPES_NEED_EVENT_PREFIX = {GROUP_ADD_ROBOT, FRIEND_ADD}
 _EVENT_PREFIX_MAP = {GROUP_ADD_ROBOT: "ROBOT_ADD", FRIEND_ADD: "FRIEND_ADD"}
+_STREAMING_SPLIT_CHARS = "。？！…"
+
+
+def _count_same_char_run(text: str, start: int) -> int:
+    char = text[start]
+    end = start + 1
+    while end < len(text) and text[end] == char:
+        end += 1
+    return end - start
+
+
+def _can_open_markdown_span(text: str, start: int, run_len: int, marker: str) -> bool:
+    next_char = text[start + run_len] if start + run_len < len(text) else ""
+    prev_char = text[start - 1] if start > 0 else ""
+    if marker == "_" and prev_char.isalnum() and next_char.isalnum():
+        return False
+    return bool(next_char) and not next_char.isspace()
+
+
+def _can_close_markdown_span(text: str, start: int, run_len: int, marker: str) -> bool:
+    prev_char = text[start - 1] if start > 0 else ""
+    next_char = text[start + run_len] if start + run_len < len(text) else ""
+    if marker == "_" and prev_char.isalnum() and next_char.isalnum():
+        return False
+    return bool(prev_char) and not prev_char.isspace()
+
+
+def _advance_markdown_span_state(is_open: bool, can_open: bool, can_close: bool) -> bool:
+    if is_open and can_close:
+        return False
+    if not is_open and can_open:
+        return True
+    return is_open
+
+
+def _find_safe_streaming_split_index(text: str) -> int | None:
+    strike_open = False
+    strong_star_open = False
+    emphasis_star_open = False
+    strong_underscore_open = False
+    emphasis_underscore_open = False
+    link_text_depth = 0
+    link_dest_depth = 0
+    pending_link_dest = False
+    fenced_code_ticks = 0
+    inline_code_ticks = 0
+    escaped = False
+    i = 0
+
+    while i < len(text):
+        ch = text[i]
+
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\":
+            escaped = True
+            i += 1
+            continue
+
+        if fenced_code_ticks:
+            if ch == "`":
+                run_len = _count_same_char_run(text, i)
+                if run_len >= fenced_code_ticks:
+                    i += fenced_code_ticks
+                    fenced_code_ticks = 0
+                    continue
+            i += 1
+            continue
+
+        if inline_code_ticks:
+            if ch == "`":
+                run_len = _count_same_char_run(text, i)
+                if run_len >= inline_code_ticks:
+                    delim_len = inline_code_ticks
+                    inline_code_ticks = 0
+                    i += delim_len
+                    continue
+            i += 1
+            continue
+
+        if ch == "`":
+            run_len = _count_same_char_run(text, i)
+            if run_len >= 3:
+                fenced_code_ticks = run_len
+            else:
+                inline_code_ticks = run_len
+            i += run_len
+            continue
+
+        if pending_link_dest:
+            if ch.isspace():
+                i += 1
+                continue
+            if ch == "(":
+                link_dest_depth = 1
+                pending_link_dest = False
+                i += 1
+                continue
+            pending_link_dest = False
+
+        if link_dest_depth > 0:
+            if ch == "(":
+                link_dest_depth += 1
+            elif ch == ")":
+                link_dest_depth -= 1
+            i += 1
+            continue
+
+        if ch == "[":
+            link_text_depth += 1
+            i += 1
+            continue
+        if ch == "]" and link_text_depth > 0:
+            link_text_depth -= 1
+            if link_text_depth == 0:
+                pending_link_dest = True
+            i += 1
+            continue
+        if link_text_depth > 0:
+            i += 1
+            continue
+
+        if ch in {"*", "_", "~"}:
+            run_len = _count_same_char_run(text, i)
+            can_open = _can_open_markdown_span(text, i, run_len, ch)
+            can_close = _can_close_markdown_span(text, i, run_len, ch)
+
+            if ch == "~":
+                for _ in range(run_len // 2):
+                    strike_open = _advance_markdown_span_state(
+                        strike_open, can_open, can_close
+                    )
+                i += run_len
+                continue
+
+            if ch == "*":
+                for _ in range(run_len // 2):
+                    strong_star_open = _advance_markdown_span_state(
+                        strong_star_open, can_open, can_close
+                    )
+                if run_len % 2:
+                    emphasis_star_open = _advance_markdown_span_state(
+                        emphasis_star_open, can_open, can_close
+                    )
+                i += run_len
+                continue
+
+            for _ in range(run_len // 2):
+                strong_underscore_open = _advance_markdown_span_state(
+                    strong_underscore_open, can_open, can_close
+                )
+            if run_len % 2:
+                emphasis_underscore_open = _advance_markdown_span_state(
+                    emphasis_underscore_open, can_open, can_close
+                )
+            i += run_len
+            continue
+
+        if (
+            ch in _STREAMING_SPLIT_CHARS
+            and not strike_open
+            and not strong_star_open
+            and not emphasis_star_open
+            and not strong_underscore_open
+            and not emphasis_underscore_open
+            and not pending_link_dest
+        ):
+            end = i + 1
+            while end < len(text) and text[end] in _STREAMING_SPLIT_CHARS:
+                end += 1
+            return end - 1
+
+        i += 1
+
+    return None
 
 
 class QQRestAPIEvent(AstrMessageEvent):
@@ -81,6 +258,8 @@ class QQRestAPIEvent(AstrMessageEvent):
     def _extract_message_id(self, response: Any) -> str | None:
         if not response:
             return None
+        if isinstance(response, SendResult):
+            return response.message_id
         if isinstance(response, dict):
             return response.get("id") or response.get("msg_id") or response.get("message_id")
         return None
@@ -150,6 +329,114 @@ class QQRestAPIEvent(AstrMessageEvent):
         await asyncio.sleep(seconds)
         await self.recall_message(message_id)
 
+    def _should_prefer_markdown_for_default_send(self) -> bool:
+        if self.get_extra("_qq_restapi_force_plain_send"):
+            return False
+        result = self.get_result()
+        if result is None:
+            return False
+        return result.result_content_type in (
+            ResultContentType.LLM_RESULT,
+            ResultContentType.STREAMING_RESULT,
+        )
+
+    async def _send_chain_without_markdown_preference(self, chain: MessageChain):
+        previous = self.get_extra("_qq_restapi_force_plain_send")
+        self.set_extra("_qq_restapi_force_plain_send", True)
+        try:
+            await self.send(chain)
+        finally:
+            self.set_extra("_qq_restapi_force_plain_send", previous)
+
+    async def _send_streaming_text_chain(
+        self, chain: MessageChain, *, prefer_markdown: bool
+    ):
+        if prefer_markdown:
+            previous = self.get_extra("_qq_restapi_streaming_segment_send")
+            self.set_extra("_qq_restapi_streaming_segment_send", True)
+            try:
+                await self.send(chain)
+                return
+            finally:
+                self.set_extra("_qq_restapi_streaming_segment_send", previous)
+        await self._send_chain_without_markdown_preference(chain)
+
+    async def _process_streaming_buffer(
+        self, buffer: str, *, prefer_markdown: bool
+    ) -> str:
+        while True:
+            split_index = _find_safe_streaming_split_index(buffer)
+            if split_index is None:
+                break
+            matched_text = buffer[: split_index + 1]
+            await self._send_streaming_text_chain(
+                MessageChain([Plain(matched_text)]),
+                prefer_markdown=prefer_markdown,
+            )
+            buffer = buffer[split_index + 1 :]
+            await asyncio.sleep(1.5)
+        return buffer
+
+    async def _send_text_reply(
+        self,
+        content: str = "",
+        *,
+        buttons=None,
+        hide_avatar_and_center: bool | None = None,
+        auto_delete_time: int | None = None,
+        use_markdown: bool = False,
+        allow_markdown_fallback: bool = False,
+        store_history: bool = True,
+        history_requires_success: bool = False,
+    ) -> str | None:
+        msg_id, event_id = self._resolve_ids()
+        target = self._target()
+
+        if use_markdown or buttons:
+            markdown_content = content or "\u200B"
+            send_result = await self._sender.send_markdown_content(
+                target=target,
+                content=markdown_content,
+                msg_id=msg_id,
+                keyboard=buttons,
+                hide_avatar_and_center=bool(hide_avatar_and_center),
+                event_id=event_id,
+            )
+            if allow_markdown_fallback and self._sender.should_downgrade_markdown_to_plain(send_result):
+                if isinstance(send_result, SendResult):
+                    logger.info(
+                        "[qq_restapi] 原生 Markdown 发送失败，回退纯文本: scene=%s status=%s code=%s message=%s",
+                        target.get("scene"),
+                        send_result.http_status,
+                        send_result.code,
+                        send_result.message or "-",
+                    )
+                send_result = await self._sender.send_plain(
+                    target=target,
+                    content=content,
+                    msg_id=msg_id,
+                    event_id=event_id,
+                )
+        else:
+            send_result = await self._sender.send_plain(
+                target=target,
+                content=content,
+                msg_id=msg_id,
+                event_id=event_id,
+            )
+
+        message_id = self._extract_message_id(send_result)
+        if auto_delete_time:
+            asyncio.create_task(self._schedule_recall(message_id, auto_delete_time))
+        if store_history and (
+            not history_requires_success
+            or message_id
+            or (isinstance(send_result, SendResult) and send_result.ok)
+        ):
+            await self._store_history_if_needed(content)
+        self._record_last_message_id(message_id)
+        return message_id
+
     async def send(self, message: MessageChain):
         chain = self._strip_group_auto_mention(message.chain)
         content_parts: list[str] = []
@@ -177,7 +464,19 @@ class QQRestAPIEvent(AstrMessageEvent):
         elif image_comp is not None:
             await self.reply_image(image_comp, content=content)
         else:
-            await self.reply(content=content)
+            prefer_markdown = self._should_prefer_markdown_for_default_send()
+            if prefer_markdown and not self.get_extra("_qq_restapi_streaming_segment_send"):
+                logger.info(
+                    "[qq_restapi] 普通回复启用原生 Markdown 优先发送: scene=%s",
+                    getattr(self.message_obj, "qq_scene", "unknown"),
+                )
+            await self._send_text_reply(
+                content=content,
+                use_markdown=prefer_markdown,
+                allow_markdown_fallback=prefer_markdown,
+                store_history=True,
+                history_requires_success=True,
+            )
 
         await super().send(message)
 
@@ -196,21 +495,32 @@ class QQRestAPIEvent(AstrMessageEvent):
             return await super().send_streaming(generator, use_fallback)
 
         buffer_text = ""
-        pattern = re.compile(r"[^。？！~…]+[。？！~…]+")
+        prefer_markdown = self._should_prefer_markdown_for_default_send()
+        if prefer_markdown:
+            logger.info(
+                "[qq_restapi] 流式分段回退发送启用原生 Markdown 优先: scene=%s",
+                getattr(self.message_obj, "qq_scene", "unknown"),
+            )
         async for chain in generator:
             if not isinstance(chain, MessageChain):
                 continue
             for comp in chain.chain:
                 if isinstance(comp, Plain):
                     buffer_text += comp.text
-                    if any(p in buffer_text for p in "。？！~…"):
-                        buffer_text = await self.process_buffer(buffer_text, pattern)
+                    if any(p in buffer_text for p in _STREAMING_SPLIT_CHARS):
+                        buffer_text = await self._process_streaming_buffer(
+                            buffer_text,
+                            prefer_markdown=prefer_markdown,
+                        )
                 else:
-                    await self.send(MessageChain([comp]))
+                    await self._send_chain_without_markdown_preference(MessageChain([comp]))
                     await asyncio.sleep(1.5)
 
         if buffer_text.strip():
-            await self.send(MessageChain([Plain(buffer_text)]))
+            await self._send_streaming_text_chain(
+                MessageChain([Plain(buffer_text)]),
+                prefer_markdown=prefer_markdown,
+            )
         return await super().send_streaming(generator, use_fallback)
 
     def _strip_group_auto_mention(self, chain):
@@ -240,10 +550,9 @@ class QQRestAPIEvent(AstrMessageEvent):
         auto_delete_time: int | None = None,
         use_markdown: bool | None = None,
     ):
-        msg_id, event_id = self._resolve_ids()
-        target = self._target()
-
         if media:
+            msg_id, event_id = self._resolve_ids()
+            target = self._target()
             if isinstance(media, dict) and media.get("file_info"):
                 resp = await self._sender.send_media_file_info(
                     target=target,
@@ -262,27 +571,30 @@ class QQRestAPIEvent(AstrMessageEvent):
                     event_id=event_id,
                 )
             else:
-                resp = await self._sender.send_plain(target=target, content=content, msg_id=msg_id, event_id=event_id)
-        else:
-            if use_markdown or buttons:
-                markdown_content = content or "\u200B"
-                resp = await self._sender.send_markdown_content(
+                resp = await self._sender.send_plain(
                     target=target,
-                    content=markdown_content,
+                    content=content,
                     msg_id=msg_id,
-                    keyboard=buttons,
-                    hide_avatar_and_center=bool(hide_avatar_and_center),
                     event_id=event_id,
                 )
-            else:
-                resp = await self._sender.send_plain(target=target, content=content, msg_id=msg_id, event_id=event_id)
 
-        message_id = self._extract_message_id(resp)
-        if auto_delete_time:
-            asyncio.create_task(self._schedule_recall(message_id, auto_delete_time))
-        await self._store_history_if_needed(content)
-        self._record_last_message_id(message_id)
-        return message_id
+            message_id = self._extract_message_id(resp)
+            if auto_delete_time:
+                asyncio.create_task(self._schedule_recall(message_id, auto_delete_time))
+            await self._store_history_if_needed(content)
+            self._record_last_message_id(message_id)
+            return message_id
+
+        return await self._send_text_reply(
+            content=content,
+            buttons=buttons,
+            hide_avatar_and_center=hide_avatar_and_center,
+            auto_delete_time=auto_delete_time,
+            use_markdown=bool(use_markdown),
+            allow_markdown_fallback=False,
+            store_history=True,
+            history_requires_success=False,
+        )
 
     async def reply_image(self, image, content: str = "", auto_delete_time: int | None = None):
         msg_id, event_id = self._resolve_ids()

@@ -2,7 +2,8 @@ import base64
 import random
 import re
 import time
-from typing import Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Any, Optional, Sequence, Tuple
 
 from astrbot import logger
 
@@ -13,6 +14,17 @@ _DEFAULT_API_BASE = "https://api.sgroup.qq.com"
 _SANDBOX_API_BASE = "https://sandbox.api.sgroup.qq.com"
 _IGNORE_ERROR_CODES = {11293, 40054002, 40054003}
 _TOKEN_EXPIRED_CODE = 11244
+_MARKDOWN_FALLBACK_ERROR_CODES = {
+    50037,
+    50041,
+    50042,
+    50054,
+    50055,
+    50056,
+    50057,
+    304036,
+}
+_NON_DOWNGRADE_HTTP_STATUSES = {401, 403, 404, 405, 429}
 
 _MARKDOWN_PATTERNS = [
     re.compile(r"(!?\[.*?\])(\s*\(.*?\))"),
@@ -28,6 +40,40 @@ def _msg_seq() -> int:
     return random.randint(10000, 999999)
 
 
+@dataclass
+class SendResult:
+    ok: bool
+    http_status: int = 0
+    data: Any = None
+    raw: str = ""
+    code: int | str | None = None
+    message: str | None = None
+    transport_error: str | None = None
+    ignored: bool = False
+
+    @property
+    def normalized_code(self) -> int | None:
+        if self.code is None:
+            return None
+        try:
+            return int(self.code)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def message_id(self) -> str | None:
+        if not isinstance(self.data, dict):
+            return None
+        message_id = (
+            self.data.get("id")
+            or self.data.get("msg_id")
+            or self.data.get("message_id")
+        )
+        if message_id is None or message_id == "":
+            return None
+        return str(message_id)
+
+
 class QQRestAPISender:
     """封装 QQ 官方 REST API 发送逻辑（对齐 Elaina 能力）。"""
 
@@ -38,7 +84,7 @@ class QQRestAPISender:
         self.is_sandbox = bool(is_sandbox)
         self.api_base = _SANDBOX_API_BASE if self.is_sandbox else _DEFAULT_API_BASE
 
-    async def _post(self, endpoint: str, payload: dict, retry: int = 1) -> dict | None:
+    async def _post(self, endpoint: str, payload: dict, retry: int = 1) -> SendResult:
         headers = await self.token_manager.auth_headers()
         client = await get_async_client()
         resp = await client.post(
@@ -47,21 +93,76 @@ class QQRestAPISender:
             headers=headers,
             timeout=20,
         )
+
+        raw_text = resp.text
         try:
             data = resp.json()
         except Exception:
-            return {"code": -1, "message": "invalid json", "raw": resp.text}
+            logger.warning(
+                "QQ REST API 返回无效 JSON: endpoint=%s, status=%s, body=%s",
+                endpoint,
+                resp.status_code,
+                raw_text[:200],
+            )
+            return SendResult(
+                ok=False,
+                http_status=resp.status_code,
+                raw=raw_text,
+                code=-1,
+                message="invalid json",
+            )
 
         if isinstance(data, dict) and "code" in data and "message" in data:
             code = data.get("code")
+            message = str(data.get("message"))
             if code in _IGNORE_ERROR_CODES:
-                return None
+                return SendResult(
+                    ok=False,
+                    http_status=resp.status_code,
+                    data=data,
+                    raw=raw_text,
+                    code=code,
+                    message=message,
+                    ignored=True,
+                )
             if code == _TOKEN_EXPIRED_CODE and retry > 0:
                 await self.token_manager.refresh()
                 return await self._post(endpoint, payload, retry=retry - 1)
-            logger.warning(f"QQ REST API 发送失败: code={code}, message={data.get('message')}")
-            return data
-        return data
+            logger.warning("QQ REST API 发送失败: code=%s, message=%s", code, message)
+            return SendResult(
+                ok=False,
+                http_status=resp.status_code,
+                data=data,
+                raw=raw_text,
+                code=code,
+                message=message,
+            )
+
+        ok = 200 <= resp.status_code < 300
+        if not ok:
+            logger.warning(
+                "QQ REST API 发送失败: status=%s, body=%s",
+                resp.status_code,
+                raw_text[:200],
+            )
+        return SendResult(
+            ok=ok,
+            http_status=resp.status_code,
+            data=data,
+            raw=raw_text,
+        )
+
+    def should_downgrade_markdown_to_plain(self, result: SendResult | None) -> bool:
+        if result is None:
+            return False
+        if result.ignored or result.transport_error:
+            return False
+        if result.http_status in _NON_DOWNGRADE_HTTP_STATUSES or result.http_status >= 500:
+            return False
+        code = result.normalized_code
+        if code == _TOKEN_EXPIRED_CODE:
+            return False
+        return code in _MARKDOWN_FALLBACK_ERROR_CODES
 
     @staticmethod
     def _build_endpoint(target: dict) -> Tuple[str, bool]:
@@ -286,8 +387,8 @@ class QQRestAPISender:
             "file_data": base64.b64encode(file_bytes).decode(),
         }
         resp = await self._post(endpoint, payload)
-        if isinstance(resp, dict):
-            return resp.get("file_info")
+        if isinstance(resp.data, dict):
+            return resp.data.get("file_info")
         return None
 
     async def upload_media_url(self, target: dict, file_url: str, file_type: int) -> Optional[str]:
@@ -311,8 +412,8 @@ class QQRestAPISender:
             "url": file_url,
         }
         resp = await self._post(endpoint, payload)
-        if isinstance(resp, dict):
-            return resp.get("file_info")
+        if isinstance(resp.data, dict):
+            return resp.data.get("file_info")
         return None
 
     async def send_image_url(
