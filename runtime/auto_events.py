@@ -22,6 +22,9 @@ from .message_parser import (
     FRIEND_DEL,
     GROUP_ADD_ROBOT,
     GROUP_DEL_ROBOT,
+    GROUP_FULL_MESSAGE,
+    GROUP_MEMBER_ADD,
+    GROUP_MEMBER_REMOVE,
     GUILD_CREATE,
     GUILD_DELETE,
     GUILD_MEMBER_ADD,
@@ -53,6 +56,8 @@ AUTO_EVENT_MAP = {
     GROUP_DEL_ROBOT: "group_del_robot",
     GROUP_MSG_RECEIVE: "group_msg_receive",
     GROUP_MSG_REJECT: "group_msg_reject",
+    GROUP_MEMBER_ADD: "group_member_add",
+    GROUP_MEMBER_REMOVE: "group_member_remove",
 
     #单聊添加/删除事件
     FRIEND_ADD: "friend_add",
@@ -83,12 +88,10 @@ AUTO_EVENT_MAP = {
     OPEN_FORUM_REPLY_CREATE: "open_forum_reply_create",
     OPEN_FORUM_REPLY_DELETE: "open_forum_reply_delete",
 
-    # 频道成员添加和删除事件
+    # 频道成员添加/更新/删除事件
     GUILD_MEMBER_ADD: "guild_member_add",
+    GUILD_MEMBER_UPDATE: "guild_member_update",
     GUILD_MEMBER_REMOVE: "guild_member_remove",
-    
-    # NOTE: 频道成员信息更新暂未收到官方回调，待后续验证；勿删此注释与代码。
-    # GUILD_MEMBER_UPDATE: "guild_member_update",
     PUBLIC_MESSAGE_DELETE: "channel_message_delete",
     DIRECT_MESSAGE_DELETE: "channel_dm_message_delete",
     # NOTE: 订阅/音频事件暂时禁用（未稳定/需 WSS 模式验证），勿删此注释与代码。
@@ -121,9 +124,32 @@ _FORUM_KEYS = {
     "open_forum_reply_delete",
 }
 
+_EVENT_LOG_GROUP_MAP = {
+    "group_add_robot": "relation",
+    "group_del_robot": "relation",
+    "friend_add": "relation",
+    "friend_del": "relation",
+    "group_msg_receive": "group_setting",
+    "group_msg_reject": "group_setting",
+    "group_member_add": "group_member",
+    "group_member_remove": "group_member",
+    "guild_create": "guild",
+    "guild_update": "guild",
+    "guild_delete": "guild",
+    "channel_create": "channel",
+    "channel_update": "channel",
+    "channel_delete": "channel",
+    "guild_member_add": "guild_member",
+    "guild_member_update": "guild_member",
+    "guild_member_remove": "guild_member",
+    "channel_message_delete": "message_delete",
+    "channel_dm_message_delete": "message_delete",
+}
+
 _LOG_ONLY_KEYS = {
     "group_msg_receive",
     "group_msg_reject",
+    "group_member_remove",
     "guild_create",
     "guild_update",
     "guild_delete",
@@ -142,9 +168,8 @@ _LOG_ONLY_KEYS = {
     "open_forum_reply_create",
     "open_forum_reply_delete",
     "guild_member_add",
+    "guild_member_update",
     "guild_member_remove",
-    # NOTE: 频道成员信息更新暂未收到官方回调，待后续验证；勿删此注释与代码。
-    # "guild_member_update",
     "channel_message_delete",
     "channel_dm_message_delete",
     # NOTE: 订阅/音频事件暂时禁用（未稳定/需 WSS 模式验证），勿删此注释与代码。
@@ -161,6 +186,9 @@ _LOG_ONLY_KEYS = {
 
 
 def _resolve_event_group(key: str) -> str | None:
+    group = _EVENT_LOG_GROUP_MAP.get(key)
+    if group:
+        return group
     if key in _REACTION_KEYS:
         return "reaction"
     if key in _AUDIT_KEYS:
@@ -223,6 +251,8 @@ def _get_auto_reply_text(
 ) -> str:
     if key == "group_add_robot":
         value = (platform_config or {}).get("group_add_robot_message")
+    elif key == "group_member_add":
+        value = (platform_config or {}).get("group_member_add_message")
     elif key == "friend_add":
         value = (platform_config or {}).get("friend_add_message")
     elif key == "new_user_welcome":
@@ -232,13 +262,37 @@ def _get_auto_reply_text(
     return str(value or "").strip()
 
 
+class _SafeFormatDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _format_auto_reply_text(text: str, event) -> str:
+    if not text:
+        return ""
+    msg = event.message_obj
+    sender = getattr(msg, "sender", None)
+    values = _SafeFormatDict(
+        user_id=getattr(sender, "user_id", "") if sender else "",
+        member_openid=getattr(msg, "qq_member_openid", ""),
+        raw_user_id=getattr(msg, "qq_raw_user_id", ""),
+        union_openid=getattr(msg, "qq_union_openid", ""),
+        group_id=getattr(msg, "group_id", ""),
+        op_user_id=getattr(msg, "qq_op_user_id", ""),
+    )
+    try:
+        return text.format_map(values)
+    except Exception:
+        return text
+
+
 def _config_enabled(
     key: str,
     config: dict[str, Any] | None,
     platform_config: dict[str, Any] | None,
 ) -> bool:
     enabled = bool(config.get("enabled")) if config else False
-    if key in {"group_add_robot", "friend_add"}:
+    if key in {"group_add_robot", "group_member_add", "friend_add"}:
         return bool(_get_auto_reply_text(key, config, platform_config))
     if not platform_config:
         return enabled
@@ -372,11 +426,12 @@ async def handle_relation_event(event) -> bool:
         return True
 
     text = _get_auto_reply_text(key, config, getattr(event, "_platform_config", None))
+    text = _format_auto_reply_text(text, event)
     if not text:
         return True
 
     msg_id, event_id = event._resolve_ids()
-    await event._sender.send_plain(
+    await event._sender.send_text_prefer_markdown(
         target=event._target(),
         content=text,
         msg_id=msg_id,
@@ -387,6 +442,12 @@ async def handle_relation_event(event) -> bool:
 
 async def handle_new_user_welcome(event) -> bool:
     """新用户首次交互欢迎（不写入对话记录，避免覆盖真实对话）。"""
+    if (
+        getattr(event.message_obj, "qq_event_type", None) == GROUP_FULL_MESSAGE
+        and not getattr(event.message_obj, "qq_is_at_self", False)
+    ):
+        return False
+
     config = get_auto_event("new_user_welcome") or {}
     if not _scene_allowed(config, getattr(event.message_obj, "qq_scene", None)):
         return False
@@ -420,7 +481,7 @@ async def handle_new_user_welcome(event) -> bool:
 
     _log_auto_event(event, "new_user_welcome", config)
     msg_id, event_id = event._resolve_ids()
-    await event._sender.send_plain(
+    await event._sender.send_text_prefer_markdown(
         target=event._target(),
         content=text,
         msg_id=msg_id,

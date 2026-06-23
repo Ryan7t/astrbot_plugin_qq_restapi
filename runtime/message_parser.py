@@ -1,10 +1,12 @@
 import re
+from urllib.parse import unquote
 
-from astrbot.api.message_components import At, Image, Plain
+from astrbot.api.message_components import At, AtAll, Image, Plain
 from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
 from astrbot.core.message.components import BaseMessageComponent
 
 GROUP_MESSAGE = "GROUP_AT_MESSAGE_CREATE"
+GROUP_FULL_MESSAGE = "GROUP_MESSAGE_CREATE"
 DIRECT_MESSAGE = "C2C_MESSAGE_CREATE"
 INTERACTION = "INTERACTION_CREATE"
 CHANNEL_MESSAGE = "AT_MESSAGE_CREATE"
@@ -14,6 +16,8 @@ GROUP_MSG_REJECT = "GROUP_MSG_REJECT"
 GROUP_MSG_RECEIVE = "GROUP_MSG_RECEIVE"
 GROUP_ADD_ROBOT = "GROUP_ADD_ROBOT"
 GROUP_DEL_ROBOT = "GROUP_DEL_ROBOT"
+GROUP_MEMBER_ADD = "GROUP_MEMBER_ADD"
+GROUP_MEMBER_REMOVE = "GROUP_MEMBER_REMOVE"
 FRIEND_ADD = "FRIEND_ADD"
 FRIEND_DEL = "FRIEND_DEL"
 GUILD_CREATE = "GUILD_CREATE"
@@ -48,6 +52,8 @@ OPEN_FORUM_POST_DELETE = "OPEN_FORUM_POST_DELETE"
 OPEN_FORUM_REPLY_CREATE = "OPEN_FORUM_REPLY_CREATE"
 OPEN_FORUM_REPLY_DELETE = "OPEN_FORUM_REPLY_DELETE"
 
+_MSG_IDX_PATTERN = re.compile(r"(?:^|[?&])msg_idx=([^&]+)")
+
 
 def _strip_bot_mention(raw: str, bot_id: str | None) -> str:
     if not raw:
@@ -63,6 +69,57 @@ def _strip_bot_mention(raw: str, bot_id: str | None) -> str:
         if end != -1:
             content = content[end + 1 :].lstrip()
     return content
+
+
+def _strip_known_mentions(raw: str, mention_ids: list[str]) -> str:
+    if not raw:
+        return ""
+    content = raw
+    for mention_id in mention_ids:
+        if not mention_id:
+            continue
+        for prefix in (f"<@!{mention_id}>", f"<@{mention_id}>"):
+            content = content.replace(prefix, "")
+    return content.strip()
+
+
+def _parse_mentions(mentions, bot_id: str | None = None) -> dict:
+    result = {
+        "mentions": [],
+        "self_mention_ids": [],
+        "is_at_self": False,
+        "is_at_other_bot": False,
+        "is_at_other_user": False,
+        "is_at_all": False,
+        "bot_member_role": "",
+    }
+    if not isinstance(mentions, list):
+        return result
+
+    normalized_mentions = []
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        normalized_mentions.append(mention)
+        mention_id = str(mention.get("id") or mention.get("member_openid") or "")
+        scope = mention.get("scope")
+        is_you = mention.get("is_you") is True or bool(bot_id and mention_id == str(bot_id))
+        if scope == "all":
+            result["is_at_all"] = True
+            continue
+        if is_you:
+            result["is_at_self"] = True
+            if mention_id:
+                result["self_mention_ids"].append(mention_id)
+            result["bot_member_role"] = str(mention.get("member_role") or "")
+            continue
+        if mention.get("bot") is True:
+            result["is_at_other_bot"] = True
+            continue
+        result["is_at_other_user"] = True
+
+    result["mentions"] = normalized_mentions
+    return result
 
 
 def _swap_ids(uid: str | None, unid: str | None, should_swap: bool):
@@ -110,11 +167,28 @@ def _normalize_event_type(value) -> str:
     return value.upper()
 
 
+def _extract_msg_idx(scene: dict) -> str:
+    if not isinstance(scene, dict):
+        return ""
+    ext = scene.get("ext", [])
+    if isinstance(ext, str):
+        ext = [ext]
+    if not isinstance(ext, list):
+        return ""
+    for item in ext:
+        if not isinstance(item, str):
+            continue
+        matched = _MSG_IDX_PATTERN.search(item)
+        if matched:
+            return unquote(matched.group(1))
+    return ""
+
+
 def parse_event(
     payload: dict,
     bot_id: str | None = None,
-    use_union_id_for_group: bool = False,
-    use_union_id_for_channel: bool = False,
+    use_union_id_for_group: bool = True,
+    use_union_id_for_channel: bool = True,
 ) -> AstrBotMessage:
     """
     将 QQ 事件转换为 AstrBotMessage。
@@ -161,9 +235,19 @@ def parse_event(
 
     msg_chain: list[BaseMessageComponent] = []
 
-    if t == GROUP_MESSAGE:
+    if t in {GROUP_MESSAGE, GROUP_FULL_MESSAGE}:
+        is_full_group_message = t == GROUP_FULL_MESSAGE
         abm.type = MessageType.GROUP_MESSAGE
-        content = data.get("content", "") or ""
+        raw_content = data.get("content", "") or ""
+        mention_info = _parse_mentions(data.get("mentions"), bot_id)
+        content = raw_content
+        if is_full_group_message:
+            if mention_info["is_at_self"]:
+                content = _strip_known_mentions(raw_content, mention_info["self_mention_ids"])
+        else:
+            if not bot_id and mention_info["self_mention_ids"]:
+                bot_id = mention_info["self_mention_ids"][0]
+            content = _strip_bot_mention(raw_content, bot_id)
         content = content[1:] if content.startswith("/") else content
         content, attachment_chain = _append_image_attachments(content.strip(), data.get("attachments"))
         msg_chain.append(Plain(content.strip()))
@@ -174,7 +258,8 @@ def parse_event(
             data.get("author", {}).get("union_openid"),
             use_union_id_for_group,
         )
-        group_id = data.get("group_id") or data.get("group_openid")
+        group_id = data.get("group_openid") or data.get("group_id")
+        message_scene = data.get("message_scene") if isinstance(data.get("message_scene"), dict) else {}
         abm.sender = MessageMember(user_id or "", data.get("author", {}).get("username", ""))
         abm.group_id = group_id
         abm.message_str = content.strip()
@@ -183,6 +268,17 @@ def parse_event(
         abm.qq_scene = "group"
         abm.qq_union_openid = union_openid
         abm.qq_raw_user_id = raw_user_id
+        abm.qq_member_openid = data.get("author", {}).get("member_openid")
+        abm.qq_group_openid = data.get("group_openid")
+        abm.qq_message_scene = message_scene
+        abm.qq_message_reference_id = _extract_msg_idx(message_scene)
+        abm.qq_mentions = mention_info["mentions"]
+        abm.qq_is_full_group_message = is_full_group_message
+        abm.qq_is_at_self = bool(mention_info["is_at_self"])
+        abm.qq_is_at_other_bot = bool(mention_info["is_at_other_bot"])
+        abm.qq_is_at_other_user = bool(mention_info["is_at_other_user"])
+        abm.qq_is_at_all = bool(mention_info["is_at_all"])
+        abm.qq_bot_member_role = mention_info["bot_member_role"]
         abm.qq_is_group = True
         abm.qq_is_private = False
         abm.qq_supports_keyboard = True
@@ -415,6 +511,26 @@ def parse_event(
         abm.qq_is_private = False
         abm.qq_supports_keyboard = True
 
+    elif t in {GROUP_MEMBER_ADD, GROUP_MEMBER_REMOVE}:
+        abm.type = MessageType.OTHER_MESSAGE
+        group_id = _pick_value(data, "group_openid", "group_id", "groupId")
+        user_id = _pick_value(data, "member_openid", "user_id", "userId")
+        op_user_id = _pick_value(data, "op_member_openid", "op_user_id", "opUserId")
+        action_text = "加入" if t == GROUP_MEMBER_ADD else "退出"
+        abm.group_id = group_id
+        abm.sender = MessageMember(str(user_id or ""), "")
+        abm.message_str = f"用户 {user_id} {action_text}群聊 {group_id}"
+        abm.message = [Plain(abm.message_str)]
+        abm.session_id = group_id or ""
+        abm.qq_scene = "group"
+        abm.qq_member_openid = user_id
+        abm.qq_union_openid = user_id
+        abm.qq_raw_user_id = user_id
+        abm.qq_op_user_id = op_user_id
+        abm.qq_is_group = True
+        abm.qq_is_private = False
+        abm.qq_supports_keyboard = True
+
     elif t == FRIEND_ADD:
         abm.type = MessageType.FRIEND_MESSAGE
         user_id = data.get("openid")
@@ -606,4 +722,14 @@ def parse_event(
         if not any(isinstance(comp, At) for comp in msg_chain):
             msg_chain.insert(0, At(qq=abm.self_id))
             abm.message = msg_chain
+    if t == GROUP_FULL_MESSAGE:
+        has_at_self = any(
+            isinstance(comp, At) and not isinstance(comp, AtAll)
+            for comp in msg_chain
+        )
+        if getattr(abm, "qq_is_at_self", False) and not has_at_self:
+            msg_chain.insert(0, At(qq=abm.self_id))
+        if getattr(abm, "qq_is_at_all", False) and not any(isinstance(comp, AtAll) for comp in msg_chain):
+            msg_chain.insert(0, AtAll())
+        abm.message = msg_chain
     return abm

@@ -14,6 +14,7 @@ _PLUGIN_CONFIG_KEYS = {
     "bilibili_image_bed_config",
     "debug_event_log",
     "group_add_robot_message",
+    "group_member_add_message",
     "friend_add_message",
     "new_user_welcome_message",
     "enable_group_remove_notice",

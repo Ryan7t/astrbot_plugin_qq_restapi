@@ -1,12 +1,13 @@
 import asyncio
 import base64
 import hashlib
+import json
 import re
 import time
 from typing import Any, Sequence
 
 from astrbot import logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, ResultContentType
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Image, Plain, Record, Video
 from astrbot.core.utils.io import download_image_by_url
 from astrbot.core.utils.tencent_record_helper import audio_to_tencent_silk_base64
@@ -20,6 +21,8 @@ from .message_parser import (
     DIRECT_MESSAGE,
     FRIEND_ADD,
     GROUP_ADD_ROBOT,
+    GROUP_FULL_MESSAGE,
+    GROUP_MEMBER_ADD,
     GROUP_MESSAGE,
     INTERACTION,
 )
@@ -38,14 +41,19 @@ from .template_registry import resolve_template_id
 
 _MSG_TYPES_NEED_MSG_ID = {
     GROUP_MESSAGE,
+    GROUP_FULL_MESSAGE,
     DIRECT_MESSAGE,
     CHANNEL_MESSAGE,
     CHANNEL_MESSAGE_CREATE,
     CHANNEL_DIRECT_MESSAGE,
 }
-_MSG_TYPES_NEED_EVENT_ID = {INTERACTION, GROUP_ADD_ROBOT}
-_MSG_TYPES_NEED_EVENT_PREFIX = {GROUP_ADD_ROBOT, FRIEND_ADD}
-_EVENT_PREFIX_MAP = {GROUP_ADD_ROBOT: "ROBOT_ADD", FRIEND_ADD: "FRIEND_ADD"}
+_MSG_TYPES_NEED_EVENT_ID = {INTERACTION, GROUP_ADD_ROBOT, GROUP_MEMBER_ADD}
+_MSG_TYPES_NEED_EVENT_PREFIX = {GROUP_ADD_ROBOT, FRIEND_ADD, GROUP_MEMBER_ADD}
+_EVENT_PREFIX_MAP = {
+    GROUP_ADD_ROBOT: "ROBOT_ADD",
+    FRIEND_ADD: "FRIEND_ADD",
+    GROUP_MEMBER_ADD: "GROUP_MEMBER_ADD",
+}
 _STREAMING_SPLIT_CHARS = "。？！…"
 
 
@@ -291,6 +299,7 @@ class QQRestAPIEvent(AstrMessageEvent):
             return
         platform_id = self.get_platform_id() or "unknown"
         user_text = user_text or self.message_str or self.get_message_outline() or "[empty]"
+        user_text = self._format_user_history_text(user_text)
         assistant_payload = bot_text
         if isinstance(assistant_payload, list):
             assistant_text = _summarize_content_parts(assistant_payload) or "[empty]"
@@ -310,6 +319,24 @@ class QQRestAPIEvent(AstrMessageEvent):
                     self.unified_msg_origin,
                     platform_id,
                 )
+            if self.get_extra("_qq_restapi_incoming_history_stored"):
+                incoming_umo = (
+                    self.get_extra("_qq_restapi_incoming_history_umo")
+                    or self.unified_msg_origin
+                )
+                incoming_cid = (
+                    self.get_extra("_qq_restapi_incoming_history_cid")
+                    or cid
+                )
+                await self._append_assistant_history(
+                    conv_mgr,
+                    incoming_umo,
+                    incoming_cid,
+                    assistant_payload or "[empty]",
+                )
+                self.set_extra("_qq_restapi_history_stored", True)
+                logger.info("对话记录写入成功: cid=%s", incoming_cid)
+                return
             await conv_mgr.add_message_pair(
                 cid,
                 UserMessageSegment(content=user_text),
@@ -323,6 +350,149 @@ class QQRestAPIEvent(AstrMessageEvent):
     async def store_history(self, bot_text: str, user_text: str | None = None):
         await self._store_history_if_needed(bot_text, user_text=user_text)
 
+    def _is_full_group_message(self) -> bool:
+        return getattr(self.message_obj, "qq_event_type", "") == GROUP_FULL_MESSAGE
+
+    def _is_likely_framework_wake_message(self) -> bool:
+        if getattr(self.message_obj, "qq_is_at_self", False):
+            return True
+        if getattr(self.message_obj, "qq_is_at_all", False):
+            return True
+        ctx = get_context()
+        if not ctx:
+            star_mgr = getattr(StarContext, "_star_manager", None)
+            if star_mgr:
+                ctx = getattr(star_mgr, "context", None)
+        config = None
+        if ctx and hasattr(ctx, "get_config"):
+            try:
+                config = ctx.get_config()
+            except Exception:
+                config = None
+        wake_prefixes = []
+        if isinstance(config, dict):
+            value = config.get("wake_prefix")
+            if isinstance(value, (list, tuple)):
+                wake_prefixes = [str(item) for item in value if str(item)]
+            elif value:
+                wake_prefixes = [str(value)]
+        text = (self.message_str or "").strip()
+        return bool(text and any(text.startswith(prefix) for prefix in wake_prefixes))
+
+    def _is_astrbot_group_icl_enabled(self) -> bool:
+        if getattr(self.message_obj, "qq_scene", "") != "group":
+            return False
+        ctx = get_context()
+        if not ctx:
+            star_mgr = getattr(StarContext, "_star_manager", None)
+            if star_mgr:
+                ctx = getattr(star_mgr, "context", None)
+        if not ctx or not hasattr(ctx, "get_config"):
+            return False
+        try:
+            config = ctx.get_config(umo=self.unified_msg_origin)
+        except Exception:
+            try:
+                config = ctx.get_config()
+            except Exception:
+                config = None
+        if not isinstance(config, dict):
+            return False
+        provider_ltm = config.get("provider_ltm_settings") or {}
+        return bool(provider_ltm.get("group_icl_enable", False))
+
+    def format_group_history_text(
+        self,
+        text: str,
+        *,
+        directed: bool | None = None,
+    ) -> str:
+        if getattr(self.message_obj, "qq_scene", "") != "group":
+            return text
+        sender = getattr(self.message_obj, "sender", None)
+        nickname = getattr(sender, "nickname", "") if sender else ""
+        user_id = getattr(sender, "user_id", "") if sender else ""
+        label = nickname or user_id or "unknown"
+        if directed is None:
+            directed = bool(
+                getattr(self.message_obj, "qq_is_at_self", False)
+                or getattr(self.message_obj, "qq_is_at_all", False)
+                or getattr(self, "is_at_or_wake_command", False)
+            )
+        if directed:
+            bot_label = self.get_platform_id() or self.get_self_id() or "机器人"
+            if user_id and user_id != label:
+                return f"[{label}/{user_id} -> {bot_label}]: {text}"
+            return f"[{label} -> {bot_label}]: {text}"
+        if user_id and user_id != label:
+            return f"[{label}/{user_id}]: {text}"
+        return f"[{label}]: {text}"
+
+    def _format_user_history_text(self, text: str) -> str:
+        return self.format_group_history_text(text)
+
+    async def _append_assistant_history(self, conv_mgr, umo: str, cid: str, assistant_payload):
+        conversation = await conv_mgr.get_conversation(umo, cid)
+        history: list[dict] = []
+        if conversation and conversation.history:
+            try:
+                loaded = json.loads(conversation.history)
+                if isinstance(loaded, list):
+                    history = loaded
+            except Exception as exc:
+                logger.warning("读取对话历史失败，改为空历史继续写入: %s", exc)
+        history.append(AssistantMessageSegment(content=assistant_payload).model_dump())
+        await conv_mgr.update_conversation(
+            umo,
+            cid,
+            history=history,
+        )
+
+    async def store_incoming_history_if_needed(self):
+        if not self._is_full_group_message():
+            return
+        if self.get_extra("_qq_restapi_incoming_history_stored"):
+            return
+        if self._is_likely_framework_wake_message():
+            return
+        conv_mgr = self._get_conversation_manager()
+        if not conv_mgr:
+            logger.warning("写入全量群消息上下文失败: 未获取到 conversation_manager")
+            return
+        platform_id = self.get_platform_id() or "unknown"
+        user_text = self._format_user_history_text(
+            self.message_str or self.get_message_outline() or "[empty]"
+        )
+        try:
+            cid = await conv_mgr.get_curr_conversation_id(self.unified_msg_origin)
+            if not cid:
+                cid = await conv_mgr.new_conversation(
+                    self.unified_msg_origin,
+                    platform_id,
+                )
+            conversation = await conv_mgr.get_conversation(self.unified_msg_origin, cid)
+            history: list[dict] = []
+            if conversation and conversation.history:
+                loaded = json.loads(conversation.history)
+                if isinstance(loaded, list):
+                    history = loaded
+            history.append(UserMessageSegment(content=user_text).model_dump())
+            await conv_mgr.update_conversation(
+                self.unified_msg_origin,
+                cid,
+                history=history,
+            )
+            self.set_extra("_qq_restapi_incoming_history_stored", True)
+            self.set_extra("_qq_restapi_incoming_history_umo", self.unified_msg_origin)
+            self.set_extra("_qq_restapi_incoming_history_cid", cid)
+            logger.debug(
+                "全量群消息已写入对话上下文: cid=%s message_id=%s",
+                cid,
+                getattr(self.message_obj, "message_id", None),
+            )
+        except Exception as exc:
+            logger.warning("写入全量群消息上下文失败: %s", exc)
+
     async def _schedule_recall(self, message_id: str | None, seconds: int | None):
         if not message_id or not seconds:
             return
@@ -332,13 +502,7 @@ class QQRestAPIEvent(AstrMessageEvent):
     def _should_prefer_markdown_for_default_send(self) -> bool:
         if self.get_extra("_qq_restapi_force_plain_send"):
             return False
-        result = self.get_result()
-        if result is None:
-            return False
-        return result.result_content_type in (
-            ResultContentType.LLM_RESULT,
-            ResultContentType.STREAMING_RESULT,
-        )
+        return True
 
     async def _send_chain_without_markdown_preference(self, chain: MessageChain):
         previous = self.get_extra("_qq_restapi_force_plain_send")
@@ -384,7 +548,7 @@ class QQRestAPIEvent(AstrMessageEvent):
         buttons=None,
         hide_avatar_and_center: bool | None = None,
         auto_delete_time: int | None = None,
-        use_markdown: bool = False,
+        use_markdown: bool | None = None,
         allow_markdown_fallback: bool = False,
         store_history: bool = True,
         history_requires_success: bool = False,
@@ -392,38 +556,17 @@ class QQRestAPIEvent(AstrMessageEvent):
         msg_id, event_id = self._resolve_ids()
         target = self._target()
 
-        if use_markdown or buttons:
-            markdown_content = content or "\u200B"
-            send_result = await self._sender.send_markdown_content(
-                target=target,
-                content=markdown_content,
-                msg_id=msg_id,
-                keyboard=buttons,
-                hide_avatar_and_center=bool(hide_avatar_and_center),
-                event_id=event_id,
-            )
-            if allow_markdown_fallback and self._sender.should_downgrade_markdown_to_plain(send_result):
-                if isinstance(send_result, SendResult):
-                    logger.info(
-                        "[qq_restapi] 原生 Markdown 发送失败，回退纯文本: scene=%s status=%s code=%s message=%s",
-                        target.get("scene"),
-                        send_result.http_status,
-                        send_result.code,
-                        send_result.message or "-",
-                    )
-                send_result = await self._sender.send_plain(
-                    target=target,
-                    content=content,
-                    msg_id=msg_id,
-                    event_id=event_id,
-                )
-        else:
-            send_result = await self._sender.send_plain(
-                target=target,
-                content=content,
-                msg_id=msg_id,
-                event_id=event_id,
-            )
+        prefer_markdown = use_markdown is not False or bool(buttons)
+        send_result = await self._sender.send_text_prefer_markdown(
+            target=target,
+            content=content,
+            msg_id=msg_id,
+            event_id=event_id,
+            keyboard=buttons,
+            hide_avatar_and_center=bool(hide_avatar_and_center),
+            prefer_markdown=prefer_markdown,
+            allow_markdown_fallback=allow_markdown_fallback,
+        )
 
         message_id = self._extract_message_id(send_result)
         if auto_delete_time:
@@ -590,8 +733,8 @@ class QQRestAPIEvent(AstrMessageEvent):
             buttons=buttons,
             hide_avatar_and_center=hide_avatar_and_center,
             auto_delete_time=auto_delete_time,
-            use_markdown=bool(use_markdown),
-            allow_markdown_fallback=False,
+            use_markdown=use_markdown,
+            allow_markdown_fallback=(use_markdown is not False and not buttons),
             store_history=True,
             history_requires_success=False,
         )

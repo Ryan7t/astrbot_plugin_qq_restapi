@@ -92,7 +92,10 @@ class QQRestAPIPlatformAdapter(Platform):
                 target = {"scene": "channel", "channel_id": session.session_id}
             else:
                 target = {"scene": "group", "group_id": session.session_id}
-        await self.sender.send_plain(target=target, content=message_chain.get_plain_text())
+        await self.sender.send_text_prefer_markdown(
+            target=target,
+            content=message_chain.get_plain_text(),
+        )
 
     async def _on_connect(self, _):
         logger.info("qq_restapi gateway connected")
@@ -118,8 +121,8 @@ class QQRestAPIPlatformAdapter(Platform):
         abm = parse_event(
             payload,
             bot_id=None,
-            use_union_id_for_group=effective_cfg.get("use_union_id_for_group", False),
-            use_union_id_for_channel=effective_cfg.get("use_union_id_for_channel", False),
+            use_union_id_for_group=effective_cfg.get("use_union_id_for_group", True),
+            use_union_id_for_channel=effective_cfg.get("use_union_id_for_channel", True),
         )
         if effective_cfg.get("debug_event_log", False):
             logger.debug(

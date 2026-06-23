@@ -15,6 +15,18 @@ auto_events:
     fallback_text: "机器人已退出群聊。"
     log: true
 
+  group_member_add:
+    enabled: false
+    template: ""
+    fallback_text: ""
+    log: true
+
+  group_member_remove:
+    enabled: false
+    template: ""
+    fallback_text: ""
+    log: true
+
   friend_add:
     enabled: true
     template: ""
@@ -36,6 +48,20 @@ auto_events:
       - group
 
 auto_event_log_groups:
+  relation:
+    log: true
+  group_setting:
+    log: true
+  group_member:
+    log: true
+  guild:
+    log: true
+  channel:
+    log: true
+  guild_member:
+    log: true
+  message_delete:
+    log: true
   reaction:
     log: true
   audit:

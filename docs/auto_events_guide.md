@@ -19,7 +19,7 @@
 
 ### 1.3 关键结论
 - 自动事件并不存历史，仅在触发时执行**日志记录**或**可选回复**。
-- 默认仅有 **4 个事件**具备“自动回复”能力，其余事件仅记录日志。
+- 默认仅有 **5 个事件**具备“自动回复”能力，其余事件仅记录日志。
 - `new_user_welcome` 是一条**首次聊天欢迎逻辑**，不是平台系统事件。
 
 ---
@@ -28,10 +28,10 @@
 
 ### 2.1 事件分类
 自动事件分为以下类别：
-- 群聊关系事件（机器人入群/退群、群消息设置）
+- 群聊关系事件（机器人入群/退群、群消息设置、普通群成员加入/退出）
 - 单聊关系事件（好友添加/删除）
 - 频道/子频道事件（创建/更新/删除）
-- 频道成员事件（加入/退出）
+- 频道成员事件（加入/更新/退出）
 - 表态与审核事件
 - 论坛事件
 - 消息撤回事件
@@ -68,6 +68,8 @@
 | `GROUP_DEL_ROBOT` | `group_del_robot` | 可自动回复 |
 | `GROUP_MSG_RECEIVE` | `group_msg_receive` | 仅日志 |
 | `GROUP_MSG_REJECT` | `group_msg_reject` | 仅日志 |
+| `GROUP_MEMBER_ADD` | `group_member_add` | 可自动回复 |
+| `GROUP_MEMBER_REMOVE` | `group_member_remove` | 仅日志 |
 | `FRIEND_ADD` | `friend_add` | 可自动回复 |
 | `FRIEND_DEL` | `friend_del` | 可自动回复 |
 | `GUILD_CREATE` | `guild_create` | 仅日志 |
@@ -77,13 +79,13 @@
 | `CHANNEL_UPDATE` | `channel_update` | 仅日志 |
 | `CHANNEL_DELETE` | `channel_delete` | 仅日志 |
 | `GUILD_MEMBER_ADD` | `guild_member_add` | 仅日志 |
+| `GUILD_MEMBER_UPDATE` | `guild_member_update` | 仅日志 |
 | `GUILD_MEMBER_REMOVE` | `guild_member_remove` | 仅日志 |
 | `PUBLIC_MESSAGE_DELETE` | `channel_message_delete` | 仅日志 |
 | `DIRECT_MESSAGE_DELETE` | `channel_dm_message_delete` | 仅日志 |
 
 ### 2.3 暂时禁用事件（代码注释保留）
 以下事件已在代码中标注为“暂时禁用”，不会进入自动事件映射：
-- `GUILD_MEMBER_UPDATE`（频道成员信息更新）
 - `SUBSCRIBE_MESSAGE_STATUS`（订阅状态）
 - `C2C_MSG_REJECT` / `C2C_MSG_RECEIVE`
 - `AUDIO_START` / `AUDIO_FINISH` / `AUDIO_ON_MIC` / `AUDIO_OFF_MIC`
@@ -151,13 +153,15 @@ Schema 路径: `qq_restapi/_conf_schema.json`
 与以下自动事件直接相关：
 | 自动事件 key | 插件配置字段 | 说明 |
 |---|---|---|
-| group_add_robot | group_add_robot_message | 机器人入群欢迎 |
+| group_add_robot | group_add_robot_message | 机器人自己被拉进群时的欢迎 |
+| group_member_add | group_member_add_message | 普通群成员加入群聊时的欢迎 |
 | group_del_robot | enable_group_remove_notice | 机器人退群通知 |
 | friend_add | friend_add_message | 好友添加欢迎 |
 | friend_del | enable_friend_remove_notice | 好友删除通知 |
 
 说明：
-- 对 `group_add_robot` / `friend_add`：插件配置消息不为空才发送。
+- 对 `group_add_robot` / `group_member_add` / `friend_add`：插件配置消息不为空才发送。
+- `group_add_robot_message` 和 `group_member_add_message` 是两类事件：前者是机器人自己进群，后者是群里有普通用户进群。
 - 其他事件仍遵循 `enabled=true` + 对应开关为 `true` 的规则。
 
 ### 4.3 日志分组开关（auto_event_log_groups）
@@ -172,6 +176,13 @@ Schema 路径: `qq_restapi/_conf_schema.json`
 ```json
 {
   "auto_event_log_groups": {
+    "relation": true,
+    "group_setting": true,
+    "group_member": true,
+    "guild": true,
+    "channel": true,
+    "guild_member": true,
+    "message_delete": true,
     "reaction": true,
     "audit": true,
     "forum": true
@@ -182,6 +193,13 @@ Schema 路径: `qq_restapi/_conf_schema.json`
 字段说明：
 | 字段 | 说明 |
 |---|---|
+| relation | 机器人入群/退群、好友添加/删除日志分组 |
+| group_setting | 群消息接收/拒收设置日志分组 |
+| group_member | 普通群成员加入、退出日志分组 |
+| guild | 频道创建、更新、删除日志分组 |
+| channel | 子频道创建、更新、删除日志分组 |
+| guild_member | 频道成员加入、更新、删除日志分组 |
+| message_delete | 频道消息撤回、频道私信撤回日志分组 |
 | reaction | 表态事件日志分组 |
 | audit | 审核事件日志分组 |
 | forum | 论坛事件日志分组 |

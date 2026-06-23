@@ -2,14 +2,14 @@
   "use_union_id_for_group": {
     "description": "群聊/单聊优先使用 Union OpenID",
     "type": "bool",
-    "default": false,
-    "hint": "开启后群聊/单聊场景优先记录 Union OpenID"
+    "default": true,
+    "hint": "开启后群聊/单聊场景优先记录跨场景一致的 Union OpenID；事件里没有 Union OpenID 时自动退回原始 OpenID"
   },
   "use_union_id_for_channel": {
     "description": "频道场景优先使用 Union OpenID",
     "type": "bool",
-    "default": false,
-    "hint": "开启后频道讨论组/私信优先记录 Union OpenID"
+    "default": true,
+    "hint": "开启后频道讨论组/私信优先记录跨场景一致的 Union OpenID；事件里没有 Union OpenID 时自动退回原始 OpenID"
   },
   "markdown_aj_template_id": {
     "description": "AJ 万能模板 ID",
@@ -75,7 +75,13 @@
     "description": "入群欢迎消息",
     "type": "string",
     "default": "欢迎加入，本机器人已入群～",
-    "hint": "为空则不发送"
+    "hint": "机器人自己被拉进群时发送；为空则不发送"
+  },
+  "group_member_add_message": {
+    "description": "群成员入群欢迎消息",
+    "type": "string",
+    "default": "",
+    "hint": "群里有普通用户加入时发送；为空则不发送。可用 {user_id} 和 {group_id} 占位符"
   },
   "friend_add_message": {
     "description": "好友添加欢迎消息",
@@ -110,6 +116,48 @@
         "type": "bool",
         "default": true,
         "hint": "关闭后不输出表态事件日志"
+      },
+      "relation": {
+        "description": "关系事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出机器人入群/退群、好友添加/删除日志，不影响事件接收"
+      },
+      "group_setting": {
+        "description": "群消息接收设置日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出 GROUP_MSG_RECEIVE / GROUP_MSG_REJECT 日志"
+      },
+      "group_member": {
+        "description": "群成员事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出普通群成员加入、退出日志"
+      },
+      "guild": {
+        "description": "频道变更日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出频道创建、更新、删除日志"
+      },
+      "channel": {
+        "description": "子频道变更日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出子频道创建、更新、删除日志"
+      },
+      "guild_member": {
+        "description": "频道成员事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出频道成员加入、更新、删除日志"
+      },
+      "message_delete": {
+        "description": "频道撤回事件日志",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不输出频道消息撤回和频道私信撤回日志"
       },
       "audit": {
         "description": "审核事件日志",

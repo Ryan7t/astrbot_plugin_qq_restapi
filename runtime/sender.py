@@ -155,6 +155,8 @@ class QQRestAPISender:
     def should_downgrade_markdown_to_plain(self, result: SendResult | None) -> bool:
         if result is None:
             return False
+        if result.ok:
+            return False
         if result.ignored or result.transport_error:
             return False
         if result.http_status in _NON_DOWNGRADE_HTTP_STATUSES or result.http_status >= 500:
@@ -162,7 +164,9 @@ class QQRestAPISender:
         code = result.normalized_code
         if code == _TOKEN_EXPIRED_CODE:
             return False
-        return code in _MARKDOWN_FALLBACK_ERROR_CODES
+        if code in _MARKDOWN_FALLBACK_ERROR_CODES:
+            return True
+        return 400 <= result.http_status < 500
 
     @staticmethod
     def _build_endpoint(target: dict) -> Tuple[str, bool]:
@@ -287,6 +291,50 @@ class QQRestAPISender:
         payload = {"msg_type": 0, "msg_seq": _msg_seq(), "content": content or ""}
         self._apply_ids(payload, msg_id, event_id)
         return await self._post(endpoint, payload)
+
+    async def send_text_prefer_markdown(
+        self,
+        target: dict,
+        content: str,
+        msg_id: Optional[str] = None,
+        event_id: Optional[str] = None,
+        keyboard: Optional[dict] = None,
+        hide_avatar_and_center: bool = False,
+        prefer_markdown: bool = True,
+        allow_markdown_fallback: bool = True,
+    ):
+        if not prefer_markdown:
+            return await self.send_plain(
+                target=target,
+                content=content,
+                msg_id=msg_id,
+                event_id=event_id,
+            )
+
+        send_result = await self.send_markdown_content(
+            target=target,
+            content=content or "\u200B",
+            msg_id=msg_id,
+            keyboard=keyboard,
+            hide_avatar_and_center=hide_avatar_and_center,
+            event_id=event_id,
+        )
+        if allow_markdown_fallback and self.should_downgrade_markdown_to_plain(send_result):
+            if isinstance(send_result, SendResult):
+                logger.info(
+                    "[qq_restapi] 原生 Markdown 发送失败，回退纯文本: scene=%s status=%s code=%s message=%s",
+                    target.get("scene"),
+                    send_result.http_status,
+                    send_result.code,
+                    send_result.message or "-",
+                )
+            return await self.send_plain(
+                target=target,
+                content=content,
+                msg_id=msg_id,
+                event_id=event_id,
+            )
+        return send_result
 
     async def send_markdown_content(
         self,

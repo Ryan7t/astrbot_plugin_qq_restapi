@@ -4,6 +4,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -19,6 +20,22 @@ _PRIVATE_BOT_NAME = next(
 _PRIVATE_BOT_ROOT = _PLUGIN_ROOT / _PRIVATE_BOT_NAME if _PRIVATE_BOT_NAME else None
 _PRIVATE_BOT_INSTALLED = _PRIVATE_BOT_ROOT is not None
 _PRIVATE_BOT_ERROR: Exception | None = None
+_QQ_RESTAPI_PLATFORM_NAMES = {"qq_restapi", "qq_restapi_webhook"}
+
+
+class QQRestAPIFullGroupMessageFilter(filter.CustomFilter):
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        try:
+            if event.get_platform_name() not in _QQ_RESTAPI_PLATFORM_NAMES:
+                return False
+        except Exception:
+            return False
+        message_obj = getattr(event, "message_obj", None)
+        return (
+            getattr(message_obj, "qq_scene", "") == "group"
+            and getattr(message_obj, "qq_event_type", "") == "GROUP_MESSAGE_CREATE"
+        )
+
 
 if _PRIVATE_BOT_INSTALLED:
     try:
@@ -81,7 +98,6 @@ class QQRestApiPlugin(Star):
         self.config = config
         self.db = QQRestAPIDatabase()
         set_plugin_db(self.db)
-
         from .adapters.qq_restapi_adapter import QQRestAPIPlatformAdapter  # noqa: F401
         from .adapters.qq_restapi_webhook_adapter import (  # noqa: F401
             QQRestAPIWebhookPlatformAdapter,
@@ -117,6 +133,73 @@ class QQRestApiPlugin(Star):
     def get_app_credentials(self):
         return self._get_app_credentials()
 
+    @staticmethod
+    def _is_qq_restapi_event(event: AstrMessageEvent) -> bool:
+        try:
+            return event.get_platform_name() in _QQ_RESTAPI_PLATFORM_NAMES
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_qq_restapi_group_event(event: AstrMessageEvent) -> bool:
+        if not QQRestApiPlugin._is_qq_restapi_event(event):
+            return False
+        return getattr(event.message_obj, "qq_scene", "") == "group"
+
+    @staticmethod
+    def _is_qq_restapi_full_group_event(event: AstrMessageEvent) -> bool:
+        if not QQRestApiPlugin._is_qq_restapi_group_event(event):
+            return False
+        return getattr(event.message_obj, "qq_event_type", "") == "GROUP_MESSAGE_CREATE"
+
+    @staticmethod
+    def _is_directed_group_event(event: AstrMessageEvent) -> bool:
+        if getattr(event, "is_at_or_wake_command", False):
+            return True
+        message_obj = getattr(event, "message_obj", None)
+        return bool(
+            getattr(message_obj, "qq_is_at_self", False)
+            or getattr(message_obj, "qq_is_at_all", False)
+        )
+
+    def _group_icl_enabled(self, event: AstrMessageEvent) -> bool:
+        try:
+            config = self.context.get_config(umo=event.unified_msg_origin)
+        except Exception:
+            try:
+                config = self.context.get_config()
+            except Exception:
+                config = None
+        if not isinstance(config, dict):
+            return False
+        provider_ltm = config.get("provider_ltm_settings") or {}
+        return bool(provider_ltm.get("group_icl_enable", False))
+
+    def _warn_group_icl_if_needed(self, event: AstrMessageEvent):
+        if not self._group_icl_enabled(event):
+            return
+        if event.get_extra("_qq_restapi_group_icl_warned"):
+            return
+        event.set_extra("_qq_restapi_group_icl_warned", True)
+        umo = getattr(event, "unified_msg_origin", "") or "unknown"
+        logger.warning(
+            "[qq_restapi] 检测到 AstrBot 扩展功能“群聊上下文感知(原聊天记忆增强)”已开启。"
+            "qq_restapi 已接管全量群消息上下文写入，建议在 AstrBot Web 面板关闭该开关，"
+            "否则可能出现 <system_reminder> 注入导致的重复上下文。umo=%s",
+            umo,
+        )
+
+    @staticmethod
+    def _format_group_prompt_fallback(event: AstrMessageEvent, text: str) -> str:
+        sender = getattr(event.message_obj, "sender", None)
+        nickname = getattr(sender, "nickname", "") if sender else ""
+        user_id = getattr(sender, "user_id", "") if sender else ""
+        label = nickname or user_id or "unknown"
+        bot_label = event.get_platform_id() or event.get_self_id() or "机器人"
+        if user_id and user_id != label:
+            return f"[{label}/{user_id} -> {bot_label}]: {text}"
+        return f"[{label} -> {bot_label}]: {text}"
+
     async def initialize(self):
         try:
             await self.db.initialize()
@@ -133,6 +216,37 @@ class QQRestApiPlugin(Star):
                 logger.info("QQ REST API 插件数据库已关闭")
             except Exception:
                 logger.exception("QQ REST API 插件数据库关闭失败")
+
+    @filter.custom_filter(QQRestAPIFullGroupMessageFilter, priority=-100)
+    async def qq_restapi_full_group_history(self, event: AstrMessageEvent):
+        if not self._is_qq_restapi_full_group_event(event):
+            return
+        if self._is_directed_group_event(event):
+            self._warn_group_icl_if_needed(event)
+        store = getattr(event, "store_incoming_history_if_needed", None)
+        if callable(store):
+            await store()
+
+    @filter.on_llm_request(priority=100)
+    async def qq_restapi_wrap_group_prompt(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ):
+        if not self._is_qq_restapi_group_event(event):
+            return
+        self._warn_group_icl_if_needed(event)
+        if event.get_extra("_qq_restapi_group_prompt_wrapped"):
+            return
+        prompt = (req.prompt or "").strip()
+        if not prompt:
+            return
+        formatter = getattr(event, "format_group_history_text", None)
+        if callable(formatter):
+            req.prompt = formatter(prompt, directed=True)
+        else:
+            req.prompt = self._format_group_prompt_fallback(event, prompt)
+        event.set_extra("_qq_restapi_group_prompt_wrapped", True)
 
     if _PRIVATE_BOT_INSTALLED and _PRIVATE_BOT_ERROR is None:
         @filter.command("helloworld")
