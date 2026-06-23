@@ -221,6 +221,12 @@ class QQRestAPISender:
         return payload
 
     @staticmethod
+    def _apply_message_reference(payload: dict, message_reference: Optional[dict]):
+        if message_reference:
+            payload["message_reference"] = message_reference
+        return payload
+
+    @staticmethod
     def _process_button_parameter(button_param):
         if not button_param:
             return None
@@ -286,10 +292,18 @@ class QQRestAPISender:
             params.append({"key": keys_list[i], "values": ["\u200B"]})
         return params
 
-    async def send_plain(self, target: dict, content: str, msg_id: Optional[str] = None, event_id: Optional[str] = None):
+    async def send_plain(
+        self,
+        target: dict,
+        content: str,
+        msg_id: Optional[str] = None,
+        event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
+    ):
         endpoint, _ = self._build_endpoint(target)
         payload = {"msg_type": 0, "msg_seq": _msg_seq(), "content": content or ""}
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         return await self._post(endpoint, payload)
 
     async def send_text_prefer_markdown(
@@ -302,6 +316,7 @@ class QQRestAPISender:
         hide_avatar_and_center: bool = False,
         prefer_markdown: bool = True,
         allow_markdown_fallback: bool = True,
+        message_reference: Optional[dict] = None,
     ):
         if not prefer_markdown:
             return await self.send_plain(
@@ -309,6 +324,7 @@ class QQRestAPISender:
                 content=content,
                 msg_id=msg_id,
                 event_id=event_id,
+                message_reference=message_reference,
             )
 
         send_result = await self.send_markdown_content(
@@ -318,6 +334,7 @@ class QQRestAPISender:
             keyboard=keyboard,
             hide_avatar_and_center=hide_avatar_and_center,
             event_id=event_id,
+            message_reference=message_reference,
         )
         if allow_markdown_fallback and self.should_downgrade_markdown_to_plain(send_result):
             if isinstance(send_result, SendResult):
@@ -333,6 +350,7 @@ class QQRestAPISender:
                 content=content,
                 msg_id=msg_id,
                 event_id=event_id,
+                message_reference=message_reference,
             )
         return send_result
 
@@ -344,12 +362,14 @@ class QQRestAPISender:
         keyboard: Optional[dict] = None,
         hide_avatar_and_center: bool = False,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         endpoint, allow_keyboard = self._build_endpoint(target)
         payload = {"msg_type": 2, "msg_seq": _msg_seq(), "markdown": {"content": content}}
         if hide_avatar_and_center:
             payload["markdown"].setdefault("style", {})["layout"] = "hide_avatar_and_center"
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         if keyboard and allow_keyboard:
             payload["keyboard"] = self._process_button_parameter(keyboard) or keyboard
         return await self._post(endpoint, payload)
@@ -363,6 +383,7 @@ class QQRestAPISender:
         keyboard: Optional[dict] = None,
         hide_avatar_and_center: bool = False,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         endpoint, allow_keyboard = self._build_endpoint(target)
         payload = {
@@ -373,6 +394,7 @@ class QQRestAPISender:
         if hide_avatar_and_center:
             payload["markdown"].setdefault("style", {})["layout"] = "hide_avatar_and_center"
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         if keyboard and allow_keyboard:
             payload["keyboard"] = self._process_button_parameter(keyboard) or keyboard
         return await self._post(endpoint, payload)
@@ -387,6 +409,7 @@ class QQRestAPISender:
         keyboard: Optional[dict] = None,
         hide_avatar_and_center: bool = False,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         params = self._split_markdown_to_params(text, keys)
         payload = {
@@ -397,6 +420,7 @@ class QQRestAPISender:
         if hide_avatar_and_center:
             payload["markdown"].setdefault("style", {})["layout"] = "hide_avatar_and_center"
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         endpoint, allow_keyboard = self._build_endpoint(target)
         if keyboard and allow_keyboard:
             payload["keyboard"] = self._process_button_parameter(keyboard) or keyboard
@@ -410,6 +434,7 @@ class QQRestAPISender:
         content: str = "",
         msg_id: Optional[str] = None,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         endpoint, _ = self._build_endpoint(target)
         payload = {
@@ -419,6 +444,7 @@ class QQRestAPISender:
             "ark": {"template_id": template_id, "kv": list(kv_data)},
         }
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         return await self._post(endpoint, payload)
 
     async def upload_media(self, target: dict, file_bytes: bytes, file_type: int) -> Optional[str]:
@@ -471,6 +497,7 @@ class QQRestAPISender:
         content: str = "",
         msg_id: Optional[str] = None,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         if not image_url:
             return None
@@ -488,10 +515,12 @@ class QQRestAPISender:
                 "media": {"file_info": file_info},
             }
             self._apply_ids(payload, msg_id, event_id)
+            self._apply_message_reference(payload, message_reference)
             return await self._post(endpoint, payload)
         endpoint, _ = self._build_endpoint(target)
         payload = {"content": content or "", "image": image_url}
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         return await self._post(endpoint, payload)
 
     async def send_media(
@@ -502,6 +531,7 @@ class QQRestAPISender:
         content: str = "",
         msg_id: Optional[str] = None,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         file_info = await self.upload_media(target, file_bytes, file_type)
         if not file_info:
@@ -515,6 +545,7 @@ class QQRestAPISender:
             "media": {"file_info": file_info},
         }
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         return await self._post(endpoint, payload)
 
     async def send_media_file_info(
@@ -524,6 +555,7 @@ class QQRestAPISender:
         content: str = "",
         msg_id: Optional[str] = None,
         event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
     ):
         if not file_info:
             return None
@@ -535,6 +567,7 @@ class QQRestAPISender:
             "media": {"file_info": file_info},
         }
         self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
         return await self._post(endpoint, payload)
 
     async def recall_message(self, target: dict, message_id: str):

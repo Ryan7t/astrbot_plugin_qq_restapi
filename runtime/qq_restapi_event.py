@@ -8,7 +8,7 @@ from typing import Any, Sequence
 
 from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, Image, Plain, Record, Video
+from astrbot.api.message_components import At, Image, Plain, Record, Reply, Video
 from astrbot.core.utils.io import download_image_by_url
 from astrbot.core.utils.tencent_record_helper import audio_to_tencent_silk_base64
 from astrbot.core.agent.message import UserMessageSegment, AssistantMessageSegment
@@ -259,6 +259,46 @@ class QQRestAPIEvent(AstrMessageEvent):
             prefix = _EVENT_PREFIX_MAP.get(event_type, "UNKNOWN")
             event_id = getattr(self.message_obj, "qq_event_id", None) or f"{prefix}_{int(time.time())}"
         return msg_id, event_id
+
+    def _message_reference_payload(self, reference_id: str | None):
+        if not reference_id:
+            return None
+        reference_id = str(reference_id).strip()
+        if not reference_id:
+            return None
+        return {
+            "message_id": reference_id,
+            "ignore_get_message_error": True,
+        }
+
+    def _resolve_reply_reference_id(self, reply_id: object | None = None) -> str | None:
+        reply_text = str(reply_id).strip() if reply_id is not None else ""
+        if reply_text.startswith("REFIDX"):
+            return reply_text
+
+        scene_ref = str(
+            getattr(self.message_obj, "qq_message_reference_id", "") or ""
+        ).strip()
+        if scene_ref:
+            return scene_ref
+        return reply_text or None
+
+    def _extract_message_reference(self, chain: list):
+        for comp in chain:
+            if isinstance(comp, Reply):
+                return self._message_reference_payload(
+                    self._resolve_reply_reference_id(getattr(comp, "id", None))
+                )
+        return None
+
+    @staticmethod
+    def _format_at_markdown_text(comp: At) -> str:
+        qq = str(getattr(comp, "qq", "") or "").strip()
+        if not qq:
+            return ""
+        if qq == "all":
+            return "<qqbot-at-everyone />"
+        return f'<qqbot-at-user id="{qq}" />'
 
     def _target(self) -> dict:
         return _target_from_message_obj(self.message_obj)
@@ -552,6 +592,7 @@ class QQRestAPIEvent(AstrMessageEvent):
         allow_markdown_fallback: bool = False,
         store_history: bool = True,
         history_requires_success: bool = False,
+        message_reference: dict | None = None,
     ) -> str | None:
         msg_id, event_id = self._resolve_ids()
         target = self._target()
@@ -566,6 +607,7 @@ class QQRestAPIEvent(AstrMessageEvent):
             hide_avatar_and_center=bool(hide_avatar_and_center),
             prefer_markdown=prefer_markdown,
             allow_markdown_fallback=allow_markdown_fallback,
+            message_reference=message_reference,
         )
 
         message_id = self._extract_message_id(send_result)
@@ -581,17 +623,25 @@ class QQRestAPIEvent(AstrMessageEvent):
         return message_id
 
     async def send(self, message: MessageChain):
-        chain = self._strip_group_auto_mention(message.chain)
+        chain = list(message.chain or [])
+        message_reference = self._extract_message_reference(chain)
+        chain = [comp for comp in chain if not isinstance(comp, Reply)]
         content_parts: list[str] = []
         image_comp = None
         record_comp = None
         video_comp = None
+        has_at = False
+        dropped_at_for_reference = False
 
         for comp in chain:
             if isinstance(comp, Plain):
                 content_parts.append(comp.text)
             elif isinstance(comp, At):
-                content_parts.append(f"<@!{comp.qq}>")
+                has_at = True
+                if message_reference:
+                    dropped_at_for_reference = True
+                    continue
+                content_parts.append(self._format_at_markdown_text(comp))
             elif isinstance(comp, Image) and image_comp is None:
                 image_comp = comp
             elif isinstance(comp, Record) and record_comp is None:
@@ -600,14 +650,48 @@ class QQRestAPIEvent(AstrMessageEvent):
                 video_comp = comp
 
         content = "".join(content_parts).strip()
+        if dropped_at_for_reference:
+            logger.info(
+                "[qq_restapi] 回复链同时包含引用和 @，已按策略保留引用并忽略 @，避免 QQ 客户端正文重复或裸 ID: scene=%s",
+                getattr(self.message_obj, "qq_scene", "unknown"),
+            )
         if record_comp is not None:
-            await self.reply_voice(record_comp, content=content)
+            await self.reply_voice(
+                record_comp,
+                content=content,
+                message_reference=message_reference,
+            )
         elif video_comp is not None:
-            await self.reply_video(video_comp, content=content)
+            await self.reply_video(
+                video_comp,
+                content=content,
+                message_reference=message_reference,
+            )
         elif image_comp is not None:
-            await self.reply_image(image_comp, content=content)
+            await self.reply_image(
+                image_comp,
+                content=content,
+                message_reference=message_reference,
+            )
         else:
             prefer_markdown = self._should_prefer_markdown_for_default_send()
+            if message_reference and prefer_markdown:
+                logger.info(
+                    "[qq_restapi] 回复链包含引用，改用普通文本发送以避免 QQ 客户端重复渲染 Markdown 引用: scene=%s",
+                    getattr(self.message_obj, "qq_scene", "unknown"),
+                )
+                prefer_markdown = False
+            if has_at and not message_reference:
+                if prefer_markdown:
+                    logger.info(
+                        "[qq_restapi] 回复链包含 @ 组件，使用 QQ 官方 Markdown @ 标签发送: scene=%s",
+                        getattr(self.message_obj, "qq_scene", "unknown"),
+                    )
+                else:
+                    logger.warning(
+                        "[qq_restapi] 回复链包含 @ 组件，但当前发送被强制为普通文本，QQ 可能无法渲染为真正 @: scene=%s",
+                        getattr(self.message_obj, "qq_scene", "unknown"),
+                    )
             if prefer_markdown and not self.get_extra("_qq_restapi_streaming_segment_send"):
                 logger.info(
                     "[qq_restapi] 普通回复启用原生 Markdown 优先发送: scene=%s",
@@ -619,11 +703,17 @@ class QQRestAPIEvent(AstrMessageEvent):
                 allow_markdown_fallback=prefer_markdown,
                 store_history=True,
                 history_requires_success=True,
+                message_reference=message_reference,
             )
 
         await super().send(message)
 
     async def send_streaming(self, generator, use_fallback: bool = False):
+        logger.warning(
+            "[qq_restapi] 检测到 AstrBot 流式输出正在用于 QQ REST API。"
+            "AstrBot 流式输出会跳过结果装饰阶段，无法稳定附带引用原消息、@发送人和非流式分段回复头部。"
+            "如需正确使用“回复时引用发送人消息”“回复时 @ 发送人”和分段回复，请在 AstrBot Web 面板关闭流式输出。"
+        )
         if not use_fallback:
             buffer = None
             async for chain in generator:
@@ -665,24 +755,6 @@ class QQRestAPIEvent(AstrMessageEvent):
                 prefer_markdown=prefer_markdown,
             )
         return await super().send_streaming(generator, use_fallback)
-
-    def _strip_group_auto_mention(self, chain):
-        if not chain:
-            return chain
-        if getattr(self.message_obj, "qq_scene", "") != "group":
-            return chain
-        first = chain[0]
-        if not isinstance(first, At):
-            return chain
-        sender_id = str(self.get_sender_id())
-        if str(first.qq) != sender_id:
-            return chain
-        new_chain = list(chain[1:])
-        if new_chain and isinstance(new_chain[0], Plain):
-            text = new_chain[0].text
-            if text.startswith("\n"):
-                new_chain[0] = Plain(text.lstrip("\n"))
-        return new_chain
 
     async def reply(
         self,
@@ -739,7 +811,13 @@ class QQRestAPIEvent(AstrMessageEvent):
             history_requires_success=False,
         )
 
-    async def reply_image(self, image, content: str = "", auto_delete_time: int | None = None):
+    async def reply_image(
+        self,
+        image,
+        content: str = "",
+        auto_delete_time: int | None = None,
+        message_reference: dict | None = None,
+    ):
         msg_id, event_id = self._resolve_ids()
         target = self._target()
         image_url = _component_to_url(image)
@@ -750,6 +828,7 @@ class QQRestAPIEvent(AstrMessageEvent):
                 content=content,
                 msg_id=msg_id,
                 event_id=event_id,
+                message_reference=message_reference,
             )
         else:
             image_bytes = await _component_to_bytes(image)
@@ -760,6 +839,7 @@ class QQRestAPIEvent(AstrMessageEvent):
                 content=content,
                 msg_id=msg_id,
                 event_id=event_id,
+                message_reference=message_reference,
             )
         message_id = self._extract_message_id(resp)
         if auto_delete_time:
@@ -772,7 +852,13 @@ class QQRestAPIEvent(AstrMessageEvent):
         self._record_last_message_id(message_id)
         return message_id
 
-    async def reply_voice(self, voice, content: str = "", auto_delete_time: int | None = None):
+    async def reply_voice(
+        self,
+        voice,
+        content: str = "",
+        auto_delete_time: int | None = None,
+        message_reference: dict | None = None,
+    ):
         msg_id, event_id = self._resolve_ids()
         target = self._target()
         audio_bytes = await _component_to_voice_bytes(voice)
@@ -783,6 +869,7 @@ class QQRestAPIEvent(AstrMessageEvent):
             content=content,
             msg_id=msg_id,
             event_id=event_id,
+            message_reference=message_reference,
         )
         message_id = self._extract_message_id(resp)
         if auto_delete_time:
@@ -791,7 +878,13 @@ class QQRestAPIEvent(AstrMessageEvent):
         self._record_last_message_id(message_id)
         return message_id
 
-    async def reply_video(self, video, content: str = "", auto_delete_time: int | None = None):
+    async def reply_video(
+        self,
+        video,
+        content: str = "",
+        auto_delete_time: int | None = None,
+        message_reference: dict | None = None,
+    ):
         msg_id, event_id = self._resolve_ids()
         target = self._target()
         video_bytes = await _component_to_bytes(video)
@@ -802,6 +895,7 @@ class QQRestAPIEvent(AstrMessageEvent):
             content=content,
             msg_id=msg_id,
             event_id=event_id,
+            message_reference=message_reference,
         )
         message_id = self._extract_message_id(resp)
         if auto_delete_time:
@@ -810,7 +904,14 @@ class QQRestAPIEvent(AstrMessageEvent):
         self._record_last_message_id(message_id)
         return message_id
 
-    async def reply_ark(self, template_id: int, kv_data, content: str = "", auto_delete_time: int | None = None):
+    async def reply_ark(
+        self,
+        template_id: int,
+        kv_data,
+        content: str = "",
+        auto_delete_time: int | None = None,
+        message_reference: dict | None = None,
+    ):
         msg_id, event_id = self._resolve_ids()
         target = self._target()
         kv_payload = self._convert_simple_ark_data(template_id, kv_data)
@@ -821,6 +922,7 @@ class QQRestAPIEvent(AstrMessageEvent):
             content=content,
             msg_id=msg_id,
             event_id=event_id,
+            message_reference=message_reference,
         )
         message_id = self._extract_message_id(resp)
         if auto_delete_time:

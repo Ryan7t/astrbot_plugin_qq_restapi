@@ -10,15 +10,7 @@ from astrbot.api.platform import register_platform_adapter
 from astrbot.core.utils.webhook_utils import log_webhook_info
 from astrbot.core.platform.register import platform_cls_map, platform_registry
 
-from ..runtime.message_parser import parse_event
-from ..runtime.qq_restapi_event import QQRestAPIEvent
-from ..runtime.auto_events import (
-    AUTO_EVENT_MAP,
-    auto_event_storage_enabled,
-    handle_new_user_welcome,
-    handle_relation_event,
-)
-from ..runtime.db_service import get_db_service
+from ..runtime.dispatch import handle_qq_payload
 from ..runtime.sender import QQRestAPISender
 from ..runtime.token_manager import TokenManager
 from ..runtime import merge_plugin_config
@@ -107,70 +99,12 @@ class QQRestAPIWebhookPlatformAdapter(Platform):
         return merge_plugin_config(self.config)
 
     async def _handle_incoming(self, payload: dict):
-        raw_t = payload.get("t") or payload.get("event_type") or payload.get("eventType") or payload.get("type")
-        data = payload.get("d") if isinstance(payload.get("d"), dict) else {}
-        d_keys = ",".join(sorted(data.keys())) if data else "-"
         effective_cfg = self._effective_config()
-        if effective_cfg.get("debug_event_log", False):
-            logger.debug(
-                "[qq_restapi][debug] webhook收到事件: op=%s t=%s d_keys=%s",
-                payload.get("op"),
-                raw_t,
-                d_keys,
-            )
-        abm = parse_event(
+        await handle_qq_payload(
             payload,
-            bot_id=None,
-            use_union_id_for_group=effective_cfg.get("use_union_id_for_group", True),
-            use_union_id_for_channel=effective_cfg.get("use_union_id_for_channel", True),
+            source="webhook",
+            meta=self.meta(),
+            sender=self.sender,
+            effective_config=effective_cfg,
+            commit_event=self.commit_event,
         )
-        if effective_cfg.get("debug_event_log", False):
-            logger.debug(
-                "[qq_restapi][debug] webhook解析结果: t=%s scene=%s session_id=%s guild=%s channel=%s user=%s union=%s raw=%s",
-                getattr(abm, "qq_event_type", None),
-                getattr(abm, "qq_scene", None),
-                getattr(abm, "session_id", None),
-                getattr(abm, "guild_id", None),
-                getattr(abm, "channel_id", None),
-                getattr(getattr(abm, "sender", None), "user_id", None),
-                getattr(abm, "qq_union_openid", None),
-                getattr(abm, "qq_raw_user_id", None),
-            )
-        if getattr(abm, "qq_ignore", False):
-            return
-        session_id = abm.session_id
-        if not session_id:
-            session_id = (
-                getattr(abm, "group_id", None)
-                or getattr(abm, "channel_id", None)
-                or getattr(abm, "guild_id", None)
-                or getattr(getattr(abm, "sender", None), "user_id", None)
-                or ""
-            )
-            if session_id:
-                abm.session_id = session_id
-        if not session_id and abm.type in {MessageType.GROUP_MESSAGE, MessageType.FRIEND_MESSAGE}:
-            return
-        event = QQRestAPIEvent(
-            abm.message_str,
-            abm,
-            self.meta(),
-            session_id,
-            self.sender,
-            effective_cfg,
-        )
-        db_service = get_db_service()
-        if db_service:
-            event_type = getattr(abm, "qq_event_type", None)
-            if auto_event_storage_enabled(event_type):
-                event_kind = "auto" if event_type in AUTO_EVENT_MAP else "message"
-                if event_kind == "message" and abm.type not in (
-                    MessageType.GROUP_MESSAGE,
-                    MessageType.FRIEND_MESSAGE,
-                ):
-                    event_kind = "system"
-                await db_service.record_event(event, event_kind=event_kind)
-        if await handle_relation_event(event):
-            return
-        await handle_new_user_welcome(event)
-        self.commit_event(event)

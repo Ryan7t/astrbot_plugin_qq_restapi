@@ -201,6 +201,7 @@ cython_debug/
 private_bot/
 wanbot/
 latest.txt
+data/
 
 # Marimo
 marimo/_static/
