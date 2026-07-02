@@ -7,6 +7,8 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
+from .runtime.full_group_reply import FullGroupReplyController
+
 _PLUGIN_ROOT = Path(__file__).resolve().parent
 _PRIVATE_BOT_CANDIDATES = ("private_bot", "wanbot")
 _PRIVATE_BOT_NAME = next(
@@ -96,6 +98,7 @@ class QQRestApiPlugin(Star):
         set_context(context)
         set_plugin_config(config)
         self.config = config
+        self._full_group_reply = FullGroupReplyController(context, config)
         self.db = QQRestAPIDatabase()
         set_plugin_db(self.db)
         from .adapters.qq_restapi_adapter import QQRestAPIPlatformAdapter  # noqa: F401
@@ -190,15 +193,35 @@ class QQRestApiPlugin(Star):
         )
 
     @staticmethod
-    def _format_group_prompt_fallback(event: AstrMessageEvent, text: str) -> str:
+    def _format_group_prompt_fallback(
+        event: AstrMessageEvent,
+        text: str,
+        *,
+        directed: bool = True,
+    ) -> str:
         sender = getattr(event.message_obj, "sender", None)
         nickname = getattr(sender, "nickname", "") if sender else ""
         user_id = getattr(sender, "user_id", "") if sender else ""
         label = nickname or user_id or "unknown"
+        if not directed:
+            if user_id and user_id != label:
+                return f"[{label}/{user_id}]: {text}"
+            return f"[{label}]: {text}"
         bot_label = event.get_platform_id() or event.get_self_id() or "机器人"
         if user_id and user_id != label:
             return f"[{label}/{user_id} -> {bot_label}]: {text}"
         return f"[{label} -> {bot_label}]: {text}"
+
+    @staticmethod
+    def _mark_full_group_reply(event: AstrMessageEvent, decision) -> None:
+        event.is_wake = True
+        event.is_at_or_wake_command = True
+        event.set_extra("_qq_restapi_full_group_reply_mode", decision.mode)
+        event.set_extra("_qq_restapi_full_group_reply_reason", decision.reason)
+        event.set_extra(
+            "_qq_restapi_full_group_reply_natural_history",
+            bool(decision.natural_history),
+        )
 
     async def initialize(self):
         try:
@@ -223,6 +246,22 @@ class QQRestApiPlugin(Star):
             return
         if self._is_directed_group_event(event):
             self._warn_group_icl_if_needed(event)
+            if not getattr(event, "is_at_or_wake_command", False):
+                event.is_wake = True
+                event.is_at_or_wake_command = True
+            return
+
+        decision = await self._full_group_reply.decide(event)
+        if decision.should_reply:
+            self._mark_full_group_reply(event, decision)
+            logger.info(
+                "[qq_restapi] 全量群消息命中回复策略: mode=%s reason=%s umo=%s",
+                decision.mode,
+                decision.reason,
+                getattr(event, "unified_msg_origin", ""),
+            )
+            return
+
         store = getattr(event, "store_incoming_history_if_needed", None)
         if callable(store):
             await store()
@@ -241,11 +280,18 @@ class QQRestApiPlugin(Star):
         prompt = (req.prompt or "").strip()
         if not prompt:
             return
+        natural_history = bool(
+            event.get_extra("_qq_restapi_full_group_reply_natural_history"),
+        )
         formatter = getattr(event, "format_group_history_text", None)
         if callable(formatter):
-            req.prompt = formatter(prompt, directed=True)
+            req.prompt = formatter(prompt, directed=not natural_history)
         else:
-            req.prompt = self._format_group_prompt_fallback(event, prompt)
+            req.prompt = self._format_group_prompt_fallback(
+                event,
+                prompt,
+                directed=not natural_history,
+            )
         event.set_extra("_qq_restapi_group_prompt_wrapped", True)
 
     if _PRIVATE_BOT_INSTALLED and _PRIVATE_BOT_ERROR is None:

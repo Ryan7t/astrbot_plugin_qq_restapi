@@ -71,6 +71,87 @@
     "default": false,
     "hint": "开启后输出原始事件和解析结果"
   },
+  "full_group_reply": {
+    "description": "全量群消息回复策略",
+    "type": "object",
+    "hint": "控制 GROUP_MESSAGE_CREATE 非 @ 消息是否只入库、随机回复、全部回复、每条智能判断或抽样智能判断",
+    "items": {
+      "mode": {
+        "description": "回复模式",
+        "type": "string",
+        "options": ["normal", "random_reply", "all_as_at", "smart_reply", "smart_random"],
+        "default": "normal",
+        "hint": "normal=非@只入库；random_reply=按概率回复；all_as_at=每条都回复；smart_reply=每条都让判断模型决定；smart_random=先抽样再让判断模型决定"
+      },
+      "random_probability": {
+        "description": "纯随机回复概率",
+        "type": "float",
+        "default": 0.05,
+        "hint": "random_reply 模式使用，范围 0.0-1.0，例如 0.05 约等于 5% 概率回复"
+      },
+      "random_cooldown_seconds": {
+        "description": "纯随机回复冷却秒数",
+        "type": "int",
+        "default": 0,
+        "hint": "random_reply 命中一次回复后，同一群在冷却时间内不再随机回复；0 表示不冷却"
+      },
+      "smart_sample_probability": {
+        "description": "智能随机判断前抽样概率",
+        "type": "float",
+        "default": 0.2,
+        "hint": "仅 smart_random 模式使用，先按这个概率筛选消息，命中后才调用判断模型；smart_reply 不使用此项"
+      },
+      "smart_cooldown_seconds": {
+        "description": "智能回复冷却秒数",
+        "type": "int",
+        "default": 60,
+        "hint": "smart_reply/smart_random 判断为需要回复后，同一群多少秒内不再主动接话；0 表示不冷却。smart_reply 冷却期仍会调用判断模型，但会抑制最终回复"
+      },
+      "smart_judge_provider_id": {
+        "description": "判断模型 Provider ID",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "为空时使用当前会话默认聊天模型；这里只负责判断是否回复，不生成正式回复"
+      },
+      "smart_judge_timeout_seconds": {
+        "description": "判断模型超时秒数",
+        "type": "float",
+        "default": 8.0,
+        "hint": "判断模型超时后按不回复处理，只写入上下文"
+      },
+      "smart_recent_context_messages": {
+        "description": "判断模型读取历史条数",
+        "type": "int",
+        "default": 20,
+        "hint": "仅用于 smart_reply/smart_random 的是否回复判断模型：最多读取当前 AstrBot 会话最近多少条历史作为判断上下文；不影响正式 LLM 回复时的上下文条数。0 表示判断模型只看当前消息"
+      },
+      "smart_judge_prompt": {
+        "description": "判断模型系统提示词",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用插件内置保守提示词；判断模型必须输出 {\"should_reply\": true/false, \"reason\": \"...\"}"
+      },
+      "per_group_ordered_decision": {
+        "description": "同群顺序判断",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后同一个群内按收到顺序执行抽样/判断，降低后发消息先完成判断的概率"
+      },
+      "max_pending_per_group": {
+        "description": "同群待判断上限",
+        "type": "int",
+        "default": 32,
+        "hint": "同一群等待判断的消息超过此数量时，新消息改为只入库；0 表示不限制"
+      },
+      "debug_log": {
+        "description": "回复策略调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出 smart_reply/smart_random 判断模型的简短原始结果"
+      }
+    }
+  },
   "group_add_robot_message": {
     "description": "入群欢迎消息",
     "type": "string",

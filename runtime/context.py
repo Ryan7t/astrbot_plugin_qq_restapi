@@ -20,6 +20,7 @@ _PLUGIN_CONFIG_KEYS = {
     "enable_group_remove_notice",
     "enable_friend_remove_notice",
     "auto_event_log_groups",
+    "full_group_reply",
 }
 
 

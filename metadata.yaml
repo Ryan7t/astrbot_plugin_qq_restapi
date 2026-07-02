@@ -17,6 +17,19 @@ default_config_tmpl:
   image_bed_channel_id: "" # QQ 图床子频道 ID（可空）
   bilibili_image_bed_config: {} # B 站图床配置（可空）
   bot_api_base_url: "" # private_bot 业务后端 API 地址（可空）
+  full_group_reply:
+    mode: normal # 全量群消息回复模式：normal/random_reply/all_as_at/smart_reply/smart_random
+    random_probability: 0.05 # random_reply 模式下纯随机回复概率
+    random_cooldown_seconds: 0 # random_reply 命中后的同群冷却秒数，0 表示不冷却
+    smart_sample_probability: 0.2 # smart_random 模式下进入判断模型前的抽样概率，smart_reply 不使用
+    smart_cooldown_seconds: 60 # smart_reply/smart_random 命中后的同群冷却秒数，0 表示不冷却
+    smart_judge_provider_id: "" # 判断模型 Provider ID，留空使用当前会话默认模型
+    smart_judge_timeout_seconds: 8.0 # 判断模型超时秒数
+    smart_recent_context_messages: 20 # 仅判断模型读取的最近历史条数，不影响正式 LLM 回复上下文
+    smart_judge_prompt: "" # 判断模型系统提示词，留空使用内置提示词
+    per_group_ordered_decision: true # 同群按收到顺序执行抽样/判断
+    max_pending_per_group: 32 # 同群待判断消息上限，0 表示不限制
+    debug_log: false # 输出回复策略调试日志
   group_add_robot_message: "欢迎加入，本机器人已入群～" # 入群欢迎消息（为空则不发送）
   group_member_add_message: "" # 普通群成员入群欢迎消息（为空则不发送）
   friend_add_message: "你好，我是小万，欢迎添加好友～" # 好友添加欢迎消息（为空则不发送）
@@ -37,6 +50,7 @@ config_docs:
   image_bed_channel_id: "QQ 图床子频道 ID（可空）"
   bilibili_image_bed_config: "B 站图床配置（可空）"
   bot_api_base_url: "private_bot 业务后端 API 地址（可空）"
+  full_group_reply: "全量群消息回复策略：默认 normal 只入库；可选 random_reply、all_as_at、smart_reply、smart_random"
   group_add_robot_message: "机器人自己被拉进群时的欢迎消息（为空则不发送）"
   group_member_add_message: "普通群成员加入群聊时的欢迎消息（为空则不发送，可用 {user_id}/{group_id}）"
   friend_add_message: "好友添加欢迎消息（为空则不发送）"

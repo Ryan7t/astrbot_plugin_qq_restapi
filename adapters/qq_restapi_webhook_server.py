@@ -1,8 +1,11 @@
 import asyncio
+import json
 import logging
-from typing import Any, Optional
+from binascii import Error as BinasciiError
+from typing import Any
 
 import quart
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from astrbot import logger
@@ -10,6 +13,52 @@ from astrbot import logger
 # remove logger handler
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
+
+
+_SIGNATURE_HEADER = "X-Signature-Ed25519"
+_SIGNATURE_TIMESTAMP_HEADER = "X-Signature-Timestamp"
+_ED25519_SEED_SIZE = 32
+_ED25519_SIGNATURE_SIZE = 64
+
+
+def _build_ed25519_seed(secret: str) -> bytes:
+    if not secret:
+        raise ValueError("QQ REST API bot secret is empty.")
+
+    seed = secret.encode("utf-8")
+    while len(seed) < _ED25519_SEED_SIZE:
+        seed *= 2
+    return seed[:_ED25519_SEED_SIZE]
+
+
+def _verify_qq_webhook_signature(
+    secret: str,
+    timestamp: str | None,
+    signature: str | None,
+    body: bytes,
+) -> bool:
+    if not timestamp or not signature:
+        return False
+
+    try:
+        signature_buffer = bytes.fromhex(signature)
+    except (BinasciiError, ValueError):
+        return False
+
+    if (
+        len(signature_buffer) != _ED25519_SIGNATURE_SIZE
+        or signature_buffer[63] & 224 != 0
+    ):
+        return False
+
+    try:
+        seed = _build_ed25519_seed(secret)
+        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+        public_key = private_key.public_key()
+        public_key.verify(signature_buffer, timestamp.encode("utf-8") + body)
+    except (InvalidSignature, ValueError):
+        return False
+    return True
 
 
 class QQRestAPIWebhookServer:
@@ -31,15 +80,9 @@ class QQRestAPIWebhookServer:
         self.server = quart.Quart(__name__)
         self.server.add_url_rule(self.path, view_func=self.callback, methods=["POST"])
 
-    async def repeat_seed(self, bot_secret: str, target_size: int = 32) -> bytes:
-        seed = bot_secret
-        while len(seed) < target_size:
-            seed *= 2
-        return seed[:target_size].encode("utf-8")
-
     async def webhook_validation(self, validation_payload: dict):
         """处理 QQ 官方 webhook 验证回包."""
-        seed = await self.repeat_seed(self.secret)
+        seed = _build_ed25519_seed(self.secret)
         private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
         msg = validation_payload.get("event_ts", "") + validation_payload.get("plain_token", "")
         signature = private_key.sign(msg.encode()).hex()
@@ -49,16 +92,48 @@ class QQRestAPIWebhookServer:
         return await self.handle_callback(quart.request)
 
     async def handle_callback(self, request: Any):
+        method = str(getattr(request, "method", "POST")).upper()
+        if method == "GET":
+            return {"code": 0, "message": "qq_restapi webhook endpoint"}, 200
+        if method != "POST":
+            return {"error": "method not allowed"}, 405
+
         try:
-            payload: dict = await request.json
-        except Exception:
+            body = await request.get_data()
+        except Exception as exc:
+            logger.warning(f"读取 qq_restapi_webhook 回调 body 失败: {exc}", exc_info=True)
+            return {"error": "invalid body"}, 400
+
+        if not body:
+            logger.warning("qq_restapi_webhook 回调 body 为空")
+            return {"error": "empty body"}, 400
+
+        if not _verify_qq_webhook_signature(
+            self.secret,
+            request.headers.get(_SIGNATURE_TIMESTAMP_HEADER),
+            request.headers.get(_SIGNATURE_HEADER),
+            body,
+        ):
+            logger.warning("qq_restapi_webhook 签名校验失败")
+            return {"error": "invalid signature"}, 401
+
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("qq_restapi_webhook 回调 body 不是有效 JSON")
+            return {"error": "invalid json"}, 400
+
+        if not isinstance(payload, dict):
+            logger.warning("qq_restapi_webhook 回调 JSON 顶层不是对象")
             return {"error": "invalid json"}, 400
 
         logger.debug(f"收到 qq_restapi_webhook 回调: {payload}")
 
         op = payload.get("op")
-        data = payload.get("d", {})
         if op == 13:
+            data = payload.get("d")
+            if not isinstance(data, dict):
+                return {"error": "invalid validation payload"}, 400
             # 官方验证
             return await self.webhook_validation(data)
 
