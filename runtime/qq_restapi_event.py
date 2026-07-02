@@ -10,7 +10,7 @@ from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Image, Plain, Record, Reply, Video
 from astrbot.core.utils.io import download_image_by_url
-from astrbot.core.utils.tencent_record_helper import audio_to_tencent_silk_base64
+from astrbot.core.utils.media_utils import MediaResolver
 from astrbot.core.agent.message import UserMessageSegment, AssistantMessageSegment
 from astrbot.core.star.context import Context as StarContext
 
@@ -1212,19 +1212,16 @@ async def _component_to_voice_bytes(component) -> bytes:
         return component
     if isinstance(component, Record):
         audio_path = await component.convert_to_file_path()
-        silk_b64, _ = await audio_to_tencent_silk_base64(audio_path)
-        return base64.b64decode(silk_b64)
+        return await MediaResolver(
+            audio_path,
+            media_type="audio",
+        ).to_bytes(target_format="tencent_silk")
     if isinstance(component, str):
-        audio_path = component
-        if component.startswith(("http://", "https://")):
-            from astrbot.core.utils.io import download_file
-            import tempfile
-            import os
-            temp_path = tempfile.NamedTemporaryFile(delete=False, suffix=".audio").name
-            await download_file(component, temp_path)
-            audio_path = temp_path if os.path.exists(temp_path) else component
-        silk_b64, _ = await audio_to_tencent_silk_base64(audio_path)
-        return base64.b64decode(silk_b64)
+        return await MediaResolver(
+            component,
+            media_type="audio",
+            default_suffix=".audio",
+        ).to_bytes(target_format="tencent_silk")
     raise ValueError("不支持的语音类型")
 
 

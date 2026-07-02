@@ -4,11 +4,11 @@ import logging
 from binascii import Error as BinasciiError
 from typing import Any
 
-import quart
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from astrbot import logger
+from astrbot.core.platform.webhook_server import FastAPIWebhookServer
 
 # remove logger handler
 for handler in logging.root.handlers[:]:
@@ -77,19 +77,29 @@ class QQRestAPIWebhookServer:
         self.handler = handler  # async function(payload: dict) -> None
         self.shutdown_event = asyncio.Event()
 
-        self.server = quart.Quart(__name__)
-        self.server.add_url_rule(self.path, view_func=self.callback, methods=["POST"])
+        self.server = FastAPIWebhookServer("qq-restapi-webhook")
+        self.server.add_url_rule(
+            self.path,
+            view_func=self.callback,
+            methods=["GET", "POST"],
+        )
 
     async def webhook_validation(self, validation_payload: dict):
         """处理 QQ 官方 webhook 验证回包."""
         seed = _build_ed25519_seed(self.secret)
         private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
-        msg = validation_payload.get("event_ts", "") + validation_payload.get("plain_token", "")
+        msg = validation_payload.get("event_ts", "") + validation_payload.get(
+            "plain_token",
+            "",
+        )
         signature = private_key.sign(msg.encode()).hex()
-        return {"plain_token": validation_payload.get("plain_token"), "signature": signature}
+        return {
+            "plain_token": validation_payload.get("plain_token"),
+            "signature": signature,
+        }
 
-    async def callback(self):
-        return await self.handle_callback(quart.request)
+    async def callback(self, request: Any):
+        return await self.handle_callback(request)
 
     async def handle_callback(self, request: Any):
         method = str(getattr(request, "method", "POST")).upper()
@@ -108,15 +118,6 @@ class QQRestAPIWebhookServer:
             logger.warning("qq_restapi_webhook 回调 body 为空")
             return {"error": "empty body"}, 400
 
-        if not _verify_qq_webhook_signature(
-            self.secret,
-            request.headers.get(_SIGNATURE_TIMESTAMP_HEADER),
-            request.headers.get(_SIGNATURE_HEADER),
-            body,
-        ):
-            logger.warning("qq_restapi_webhook 签名校验失败")
-            return {"error": "invalid signature"}, 401
-
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -134,8 +135,16 @@ class QQRestAPIWebhookServer:
             data = payload.get("d")
             if not isinstance(data, dict):
                 return {"error": "invalid validation payload"}, 400
-            # 官方验证
             return await self.webhook_validation(data)
+
+        if not _verify_qq_webhook_signature(
+            self.secret,
+            request.headers.get(_SIGNATURE_TIMESTAMP_HEADER),
+            request.headers.get(_SIGNATURE_HEADER),
+            body,
+        ):
+            logger.warning("qq_restapi_webhook 签名校验失败")
+            return {"error": "invalid signature"}, 401
 
         # 普通事件，交给适配器处理
         try:
@@ -145,7 +154,12 @@ class QQRestAPIWebhookServer:
         return {"code": 0}
 
     async def start(self):
-        logger.info(f"启动 QQ REST API webhook 适配器: {self.callback_server_host}:{self.port}{self.path}")
+        logger.info(
+            "启动 QQ REST API webhook 适配器: %s:%s%s",
+            self.callback_server_host,
+            self.port,
+            self.path,
+        )
         await self.server.run_task(
             host=self.callback_server_host,
             port=self.port,
