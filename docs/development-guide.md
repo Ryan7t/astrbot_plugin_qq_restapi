@@ -1,449 +1,162 @@
 # qq_restapi 开发指南
 
-> 本文档整理了开发所需的关键信息，方便研究和参考
+> 更新时间：2026-07-14
+>
+> 本文描述当前插件实现；插件始终作为 AstrBot 的平台适配器运行，不要求也不建议修改 AstrBot 框架源码。
+>
+> `metadata.yaml` 当前声明最低 AstrBot `4.22.0`；本轮自动化验证使用本地 AstrBot `4.26.4`。历史最低版本兼容性尚未重新逐版验证。
 
-## 1. 项目结构（当前）
+## 1. 项目结构与边界
 
-```
+```text
 qq_restapi/
-├── main.py                      # 插件入口
-├── adapters/
-│   ├── qq_restapi_adapter.py     # Gateway 适配器
-│   ├── qq_restapi_webhook_adapter.py
-│   ├── qq_restapi_webhook_server.py
-│   └── ws_client.py
-├── commands/
-│   └── welcome_card_test.py      # 指令示例
-├── runtime/
-│   ├── context.py
-│   ├── auto_events.py
-│   ├── message_parser.py
-│   ├── qq_restapi_event.py
-│   ├── sender.py
-│   ├── template_registry.py
-│   ├── template_store.py
-│   └── token_manager.py
-├── utils/
-│   └── scene.py                  # ✅ 场景解析工具
-├── core/
-│   └── qq/
-│       ├── sender.py
-│       └── token_manager.py
-├── templates/
-│   └── 102283541_1754015696.md
-│   └── registry.yaml
-└── doc/
-    ├── astrbot-elaina-integration-proposal.md
-    ├── astrbot-elaina-integration-requirements.md
-    └── development-guide.md
+├── main.py                  # 插件入口、生命周期、全量群消息策略、私有扩展兼容注册
+├── public_api.py            # 对外稳定接口，其他插件/私有扩展优先从这里导入
+├── adapters/                # WebSocket、Webhook 与 AstrBot 平台适配器接线
+├── runtime/                 # 分发、解析、发送、Token、模板、自动事件、回复策略
+├── db/                      # 插件自有 SQLite 模型、仓储与服务
+├── core/qq/                 # 复用 runtime 的公共 API 薄兼容层
+├── utils/                   # 场景解析等公共工具
+├── templates/               # 公共模板目录与 registry.yaml
+├── docs/                    # 插件开发和行为说明
+└── wanbot/                  # 可选私有扩展目录（不应被公开核心依赖）
 ```
 
-## 2. 模块职责（调整后）
+职责原则：
 
-```
-adapters/  - 平台适配器入口（WebSocket / Webhook）
-runtime/   - 事件解析、发送、Token、模板渲染、自动业务逻辑
-commands/  - 业务指令与测试入口
-utils/     - 场景解析与公共工具
-templates/ - Markdown 模板文本 + 模板注册表
-core/      - 旧封装残留，后续可逐步合并到 runtime
-```
+- `adapters/` 只负责平台注册和传输接入。
+- WSS 与 Webhook 收到 payload 后统一进入 `runtime/dispatch.py::handle_qq_payload()`。
+- 事件解析、发送策略和业务判断放在 `runtime/`。
+- 数据持久化只使用插件自己的 `db/`，数据库位于 AstrBot 提供的插件数据目录。
+- 外部代码优先使用 `public_api.py`，避免依赖内部目录结构。
+- 不通过修改 `astrbot/` 框架源码来实现插件功能。
 
----
+## 2. 两种平台接入
 
-## 3. 如何获取 appid/secret
+AstrBot 平台面板中提供两个适配器：
 
-### 方法一：从 context 获取配置
+| 平台名 | 接入方式 | 当前实现 |
+| --- | --- | --- |
+| `qq_restapi` | QQ Gateway WebSocket | 支持 identify、心跳、resume/reconnect、有界分发队列 |
+| `qq_restapi_webhook` | AstrBot 统一 Webhook 入口 | 依赖 AstrBot 的 `FastAPIWebhookServer`，支持 QQ 验证回包与 Ed25519 签名校验 |
+
+两个入口共用解析、去重、数据库记录、自动事件和 `commit_event()` 逻辑。Webhook 当前只支持 `unified_webhook_mode=true`；回调地址由 AstrBot 根据 `webhook_uuid` 展示和路由，不需要修改框架 Webhook 代码。
+
+## 3. 配置来源
+
+配置分为两层：
+
+- 平台配置：由两个适配器的 `default_config_tmpl` 定义，例如 `appid`、`secret`、WSS 重连参数、Webhook UUID。
+- 插件配置：由 `_conf_schema.json` 定义，例如 Union OpenID、自动欢迎、日志分组、全量群回复策略和模板配置。
+
+`runtime/context.py::merge_plugin_config()` 会把插件配置合并到平台配置的有效副本中。新增插件配置时，应同步修改：
+
+1. `_conf_schema.json`；
+2. `runtime/context.py` 中的 `_PLUGIN_CONFIG_KEYS`；
+3. `metadata.yaml` 中面向用户的默认值/说明（如该字段需要展示）；
+4. README 或对应专题文档。
+
+不要在文档或代码中写入真实 `appid`、`secret`、Webhook UUID 或私有后端地址。
+
+## 4. 获取 QQ 凭据
+
+插件或私有扩展应优先使用公共 API：
 
 ```python
-from astrbot.api.star import Context, Star, register
+from qq_restapi.public_api import get_app_credentials_from_plugin
 
-@register("qq_restapi", "YourName", "描述", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
-        super().__init__(context)
-
-        # 获取配置
-        config = context.get_config()
-
-        # 从 platform 数组中找到 QQ 官方平台配置
-        for platform in config.get("platform", []):
-            if platform.get("type") in ["qq_official", "qq_official_webhook"]:
-                if platform.get("enable"):
-                    self.appid = platform.get("appid")
-                    self.secret = platform.get("secret")
-                    break
+appid, secret = get_app_credentials_from_plugin(self)
+if not appid or not secret:
+    # 当前没有可用的 QQ 平台配置
+    ...
 ```
 
-### 方法二：从 event 获取平台信息
+`public_api.resolve_qq_platform()` 会兼容查找 `qq_restapi`、`qq_restapi_webhook` 以及框架内置 QQ 平台。不要假设事件来自 `qq_official`，也不要直接读取适配器私有属性。
+
+## 5. 消息接收链路
+
+```text
+QQ WSS / Webhook
+  -> adapters/
+  -> runtime/dispatch.py
+  -> runtime/message_parser.py
+  -> 插件 DB 记录与自动事件
+  -> QQRestAPIEvent
+  -> AstrBot commit_event()
+```
+
+系统事件由自动事件逻辑消费，不作为普通聊天消息提交给 AstrBot。群聊、单聊、频道讨论组和频道私信等有效消息会转换成 `QQRestAPIEvent`。
+
+`GROUP_MESSAGE_CREATE` 是全量群消息事件。默认 `full_group_reply.mode=normal` 时，非 @ 消息提交给 AstrBot 并由插件补写对话上下文，但不强制唤醒 LLM；其他模式见 [全量群消息回复模式说明](full_group_reply_modes.md)。
+
+## 6. 消息发送
+
+普通 AstrBot 回复仍可使用：
 
 ```python
-async def some_handler(self, event: AstrMessageEvent):
-    platform_name = event.get_platform_name()  # "qq_official" 或 "qq_official_webhook"
-    platform_id = event.get_platform_id()      # 配置中的 id，如 "小万小万"
-
-    # 获取平台实例
-    platform_inst = self.context.get_platform_inst(platform_id)
-    # 注意：platform_inst 是 QQOfficialPlatformAdapter 实例
-    # 但其 appid/secret 是私有属性
+yield event.plain_result("文本")
+yield event.image_result("https://example.com/image.png")
 ```
 
----
-
-## 4. 关键 API 参考
-
-### 4.1 AstrBot 事件对象 (AstrMessageEvent)
+当事件是本适配器的 `QQRestAPIEvent` 时，还可以调用 QQ 专用接口：
 
 ```python
-# 常用属性和方法
-event.message_str          # 纯文本消息字符串
-event.message_obj          # AstrBotMessage 对象
-event.message_obj.message_id   # 消息 ID（msg_id）
-event.message_obj.group_id     # 群 ID
-event.message_obj.sender.user_id  # 发送者 ID
-event.message_obj.raw_message  # 原始消息对象（botpy 的 Message）
-
-event.get_sender_id()      # 获取发送者 ID
-event.get_sender_name()    # 获取发送者名称
-event.get_platform_name()  # 获取平台名称 "qq_official"
-event.get_platform_id()    # 获取平台配置 ID
-event.get_message_type()   # 获取消息类型
-
-# 发送消息（AstrBot 原生方式）
-yield event.plain_result("文本内容")
-yield event.image_result("图片路径或URL")
+if hasattr(event, "reply_markdown"):
+    await event.reply(content="## Markdown", use_markdown=True)
+    await event.reply_markdown("模板 ID", params={"key": "value"})
+    await event.reply_ark(template_id=24, kv_data=[])
+    await event.reply_image(url="https://example.com/image.png")
 ```
 
-### 4.2 场景解析工具 (scene.py)
+当前普通文本发送策略是 Markdown 优先、普通文本兜底。带 `Reply` 引用时会强制使用普通文本加 QQ `message_reference`；按钮仍使用现有 keyboard 能力，尚未实现“有按钮失败后去按钮再重试”的专项降级。
+
+## 7. 模板与公共 API
+
+公共模板注册表位于 `templates/registry.yaml`。模板加载由 `runtime/template_registry.py` 和 `runtime/template_store.py` 负责，支持外部模板源注册。
+
+外部扩展可使用：
 
 ```python
-from qq_restapi.utils.scene import resolve_scene, SceneContext, SceneType
-
-# 解析场景
-context = resolve_scene(self, event)
-
-# 使用场景信息
-context.scene_type     # SceneType.GROUP_CHAT / PRIVATE_CHAT / CHANNEL_SUB_CHANNEL / CHANNEL_DM
-context.group_id       # 群 ID
-context.user_id        # 用户 ID
-context.channel_id     # 频道 ID
-context.message_id     # 消息 ID
-context.api_url        # API 端点 URL（已拼好）
-
-# 场景判断
-context.is_group       # 是否群聊
-context.is_private     # 是否单聊
-context.is_channel     # 是否频道相关
+from qq_restapi.public_api import (
+    register_external_template_source,
+    unregister_external_template_source,
+)
 ```
 
-### 4.3 模板注册表（registry.yaml）
+同一进程内复用 HTTP 客户端、解析场景或查询模板时，也应从 `public_api.py` 导入对应函数。
 
-> 用于统一维护模板 ID / 参数 / 模板正文文件，同时映射自动业务事件
+需要注意两层 API：两个平台适配器和 `QQRestAPIEvent` 直接使用 `runtime/token_manager.py`、`runtime/sender.py`；`public_api.send_markdown_template()` 为兼容既有私有扩展，保留“指定完整 API URL 并返回 `(status_code, response_text)`”的旧签名。`core/qq/` 当前只是参数与返回值适配层，Token 获取、HTTP 发送、错误解析和 Token 失效重试均复用 `runtime/`。新代码仍应优先使用事件对象或平台 sender。
 
-示例结构（简化）：
+## 8. 自动事件与数据库
 
-```yaml
-templates:
-  welcome_card:
-    id: "102283541_1754015696"
-    params: ["username", "daily_member_count", "channel_description"]
-    file: "102283541_1754015696.md"
-    keyboard_id: "102283541_1768141142"
-    scenes: ["group", "channel"]
+自动事件映射位于 `runtime/auto_events.py`，详细行为见 [自动事件说明](auto_events_guide.md)。自动事件可以：
 
-auto_events:
-  group_add_robot:
-    enabled: true
-    fallback_text: "欢迎加入，本机器人已入群～"
-    log: true
+- 写入插件自有事件日志；
+- 按日志分组开关跳过日志和对应数据库事件记录；
+- 对机器人入群、普通成员入群、好友添加等事件发送可配置欢迎文本；
+- 消费系统事件，避免其进入普通指令/LLM 流水线。
+
+插件数据库由 `db/database.py` 创建，默认文件为 AstrBot 插件数据目录下的 `qq_restapi/qq_restapi.db`。初始化当前使用 SQLModel metadata `create_all()`，只创建缺失表，不修改 AstrBot 自身数据库，也没有独立的 schema 迁移框架。
+
+## 9. 私有扩展现状
+
+当前 `main.py` 只兼容两个候选目录名：`private_bot/` 和 `wanbot/`。检测条件是目录下存在 `commands/`，随后代码会固定导入已知命令模块，并注册对应的 `@filter.command` handler；这不是任意文件的通用自动发现。
+
+私有模板目录会作为外部模板源注册。公开核心不得反向依赖 `wanbot/` 的业务逻辑。新增普通业务命令时，可靠方式仍是在插件类中显式使用 AstrBot 的 `@filter.command` 注册；若未来实现通用发现，应在本插件内设计声明式注册协议，而不是修改 AstrBot 框架加载器。
+
+## 10. 最小验证
+
+测试需要使用 AstrBot 项目的虚拟环境，以便加载框架依赖；它不会启动 AstrBot 服务，也不会连接真实 QQ：
+
+```powershell
+$env:PYTHONPATH="<AstrBot根目录>;<AstrBot根目录>\data\plugins"
+<AstrBot根目录>\venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-加载逻辑在 `runtime/template_registry.py`，支持 YAML/JSON，并带内存缓存。
+配置 schema 可单独验证：
 
-### 4.4 自动业务事件（auto_events）
-
-- 处理事件：入群/退群、好友添加/删除、新用户首次交互欢迎、频道事件/子频道事件/频道成员事件  
-- 处理位置：`runtime/auto_events.py`  
-- 行为特点：这些“关系事件”默认 **不进入 AstrBot 指令/LLM 管线**，避免被当作普通消息处理  
-- 频道类事件默认仅记录日志，不发送通知
-
-建议的插件配置项（`data/config/qq_restapi_config.json`）：
-
-```json
-{
-  "group_add_robot_message": "欢迎加入，本机器人已入群～",
-  "friend_add_message": "你好，我是小万，欢迎添加好友～",
-  "new_user_welcome_message": "欢迎第一次和我聊天～",
-  "enable_group_remove_notice": false,
-  "enable_friend_remove_notice": false
-}
+```powershell
+<AstrBot根目录>\venv\Scripts\python.exe -B -c "import json; json.load(open('_conf_schema.json', encoding='utf-8')); print('OK')"
 ```
 
----
-
-## 5. QQ 官方 API 参考
-
-### 5.1 获取 Token
-
-```
-POST https://bots.qq.com/app/getAppAccessToken
-Content-Type: application/json
-
-{
-    "appId": "你的appid",
-    "clientSecret": "你的secret"
-}
-
-响应：
-{
-    "access_token": "xxx",
-    "expires_in": 7200
-}
-```
-
-### 5.2 发送群消息
-
-```
-POST https://api.sgroup.qq.com/v2/groups/{group_id}/messages
-Authorization: QQBot {access_token}
-Content-Type: application/json
-
-{
-    "msg_type": 0,           // 0=文本, 2=Markdown, 3=Ark, 7=媒体
-    "msg_id": "原消息ID",     // 被动回复必须携带
-    "msg_seq": 12345,        // 随机序号
-    "content": "消息内容"
-}
-```
-
-### 5.3 发送 Markdown 模板
-
-```json
-{
-    "msg_type": 2,
-    "msg_id": "原消息ID",
-    "msg_seq": 12345,
-    "markdown": {
-        "custom_template_id": "模板ID",
-        "params": [
-            {"key": "参数名1", "values": ["参数值1"]},
-            {"key": "参数名2", "values": ["参数值2"]}
-        ]
-    },
-    "keyboard": {
-        "id": "按钮面板ID"
-    }
-}
-```
-
-### 5.4 构建按钮（如果不用面板ID）
-
-```json
-{
-    "keyboard": {
-        "content": {
-            "rows": [
-                {
-                    "buttons": [
-                        {
-                            "id": "1",
-                            "render_data": {
-                                "label": "按钮文字",
-                                "visited_label": "点击后文字",
-                                "style": 0
-                            },
-                            "action": {
-                                "type": 2,  // 0=跳转, 1=回调, 2=指令
-                                "data": "/指令内容",
-                                "permission": {"type": 2}
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-    }
-}
-```
-
----
-
-## 6. ElainaBot 关键代码参考
-
-### 6.1 Token 管理 (function/Access.py)
-
-路径：`/mnt/d/code/bot/ElainaBot/function/Access.py`
-
-```python
-# 核心逻辑
-_token_info = {'access_token': None, 'expires_in': 0, 'last_update': 0}
-
-def 获取新Token():
-    response = requests.post(
-        "https://bots.qq.com/app/getAppAccessToken",
-        json={"appId": appid, "clientSecret": secret}
-    )
-    _token_info['access_token'] = response.json()['access_token']
-    _token_info['expires_in'] = response.json()['expires_in']
-    _token_info['last_update'] = time.time()
-
-def BOT凭证():
-    if not _token_info['access_token'] or 过期:
-        获取新Token()
-    return _token_info['access_token']
-
-def BOTAPI(endpoint, method, data):
-    return requests.request(
-        method,
-        f"https://api.sgroup.qq.com{endpoint}",
-        headers={"Authorization": f"QQBot {BOT凭证()}"},
-        json=data
-    )
-```
-
-### 6.2 消息发送 (core/event/MessageEvent.py)
-
-路径：`/mnt/d/code/bot/ElainaBot/core/event/MessageEvent.py`
-
-关键方法：
-- `reply()` - 通用回复（第435行）
-- `reply_markdown()` - Markdown 模板（第473行）
-- `reply_image()` - 图片消息（第456行）
-- `button()` / `rows()` - 构建按钮（第1167行）
-- `upload_media()` - 媒体上传（第955行）
-
----
-
-## 7. 技术验证代码
-
-### 验证脚本 (test_technical.py)
-
-```python
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-技术验证脚本 - 验证整合方案的可行性
-"""
-
-import asyncio
-import httpx
-
-# ========== 配置 ==========
-APPID = "102083853"  # 从 cmd_config.json 获取
-SECRET = "你的secret"  # 从 cmd_config.json 获取
-TEST_GROUP_ID = "测试群ID"  # 需要一个测试群
-TEST_MSG_ID = ""  # 需要一个消息ID来回复
-
-# ========== Token 验证 ==========
-async def test_token():
-    """验证1：独立获取 token"""
-    print("=" * 50)
-    print("验证1：独立获取 Token")
-    print("=" * 50)
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://bots.qq.com/app/getAppAccessToken",
-            json={"appId": APPID, "clientSecret": SECRET}
-        )
-        data = resp.json()
-
-        if "access_token" in data:
-            print(f"✅ Token 获取成功")
-            print(f"   Token: {data['access_token'][:20]}...")
-            print(f"   有效期: {data.get('expires_in', 'N/A')} 秒")
-            return data["access_token"]
-        else:
-            print(f"❌ Token 获取失败: {data}")
-            return None
-
-# ========== 消息发送验证 ==========
-async def test_send_message(token, group_id, msg_id):
-    """验证2：直接 HTTP 发送消息"""
-    print("\n" + "=" * 50)
-    print("验证2：直接 HTTP 发送消息")
-    print("=" * 50)
-
-    if not token:
-        print("❌ 无 Token，跳过")
-        return
-
-    if not group_id or not msg_id:
-        print("⚠️ 需要提供 group_id 和 msg_id")
-        print("   请在收到消息后，从日志中获取这些 ID")
-        return
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://api.sgroup.qq.com/v2/groups/{group_id}/messages",
-            headers={
-                "Authorization": f"QQBot {token}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "msg_type": 0,
-                "msg_id": msg_id,
-                "msg_seq": 12345,
-                "content": "✅ 技术验证：HTTP 直接发送成功！"
-            }
-        )
-
-        if resp.status_code == 200:
-            print(f"✅ 消息发送成功")
-            print(f"   响应: {resp.text[:100]}...")
-        else:
-            print(f"❌ 消息发送失败")
-            print(f"   状态码: {resp.status_code}")
-            print(f"   响应: {resp.text}")
-
-# ========== 主函数 ==========
-async def main():
-    print("\n🔬 开始技术验证...\n")
-
-    # 验证1：Token
-    token = await test_token()
-
-    # 验证2：发送消息（需要手动填写 group_id 和 msg_id）
-    await test_send_message(token, TEST_GROUP_ID, TEST_MSG_ID)
-
-    print("\n" + "=" * 50)
-    print("验证完成")
-    print("=" * 50)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
----
-
-## 8. 下一步行动
-
-### 阶段 -1：技术验证
-1. 运行 `test_technical.py` 验证 Token 获取
-2. 在插件中打印 `event.message_obj.message_id` 和 `event.message_obj.group_id`
-3. 用获取到的 ID 测试消息发送
-
-### 阶段 1：开发顺序
-1. `runtime/token_manager.py` - Token 管理
-2. `runtime/sender.py` - HTTP 发送封装
-3. `runtime/message_parser.py` - 事件解析
-4. `adapters/qq_restapi_adapter.py` - Gateway 适配器
-5. `adapters/qq_restapi_webhook_adapter.py` - Webhook 适配器
-6. `runtime/template_registry.py` - 模板注册表
-7. `runtime/auto_events.py` - 自动业务逻辑
-
----
-
-## 9. 参考文件路径
-
-| 文件 | 路径 | 说明 |
-|------|------|------|
-| ElainaBot Token 管理 | `/mnt/d/code/bot/ElainaBot/function/Access.py` | Token 获取逻辑 |
-| ElainaBot 消息发送 | `/mnt/d/code/bot/ElainaBot/core/event/MessageEvent.py` | 发送方法实现 |
-| AstrBot QQ 适配器 | `/mnt/d/code/bot/AstrBotLauncher/AstrBot/astrbot/core/platform/sources/qqofficial/` | 参考消息接收 |
-| AstrBot Context | `/mnt/d/code/bot/AstrBotLauncher/AstrBot/astrbot/core/star/context.py` | 插件上下文 |
-| 主配置文件 | `/mnt/d/code/bot/AstrBotLauncher/AstrBot/data/cmd_config.json` | appid/secret 位置 |
-
----
-
-*更新时间：2026-01-12*
+当前测试覆盖 Webhook 签名、分发去重、发送降级、全量群回复辅助逻辑和 Token 刷新。触及真实事件字段、QQ API 行为或框架生命周期时，仍应在 AstrBot 中分别验证 WSS 与 Webhook 平台。

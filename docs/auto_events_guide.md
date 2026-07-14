@@ -1,133 +1,81 @@
-# QQ REST API 插件自动事件说明文档
+# QQ REST API 插件自动事件说明
 
-> **版本**: v1.0  
-> **创建日期**: 2026-01-14  
-> **状态**: 评审稿  
-> **适用范围**: qq_restapi 插件自动事件与新用户欢迎逻辑  
+> 更新时间：2026-07-14
+>
+> 适用范围：`runtime/auto_events.py`、`runtime/dispatch.py`、`templates/registry.yaml` 与插件配置。
 
----
+## 1. 关键结论
 
-## 1. 概述
+- 平台系统事件先由共享分发入口解析，再由自动事件逻辑消费，不进入普通指令/LLM 流水线。
+- 自动事件默认会输出结构化日志，并写入插件自有 SQLite 事件日志；关闭对应日志分组时，这两项都会跳过。
+- 当前有 5 类平台事件具备自动回复能力：机器人入群/退群、普通群成员加入、好友添加/删除。其中退群和删好友默认关闭，普通成员欢迎默认文本为空。
+- `new_user_welcome` 是首次聊天欢迎逻辑，不是 QQ 平台事件，也不在 `AUTO_EVENT_MAP` 中。
 
-### 1.1 文档目的
-本文档用于清晰说明 qq_restapi 插件内的“自动事件”现状，包括事件清单、默认行为、处理流程与配置方式，方便开发、测试与运营统一理解。
+## 2. 事件清单
 
-### 1.2 适用范围
-- 自动事件处理逻辑（`runtime/auto_events.py`）
-- 自动事件配置（`templates/registry.yaml`）
-- 插件开关配置（插件配置项）
+### 2.1 可自动回复事件
 
-### 1.3 关键结论
-- 自动事件并不存历史，仅在触发时执行**日志记录**或**可选回复**。
-- 默认仅有 **5 个事件**具备“自动回复”能力，其余事件仅记录日志。
-- `new_user_welcome` 是一条**首次聊天欢迎逻辑**，不是平台系统事件。
+| 平台事件 | 自动事件 key | 默认行为 | 插件配置 |
+| --- | --- | --- | --- |
+| `GROUP_ADD_ROBOT` | `group_add_robot` | 发送机器人入群欢迎 | `group_add_robot_message`，为空不发送 |
+| `GROUP_DEL_ROBOT` | `group_del_robot` | 只记录，回复默认关闭 | `enable_group_remove_notice` |
+| `GROUP_MEMBER_ADD` | `group_member_add` | 只记录，欢迎文本默认空 | `group_member_add_message`，为空不发送 |
+| `FRIEND_ADD` | `friend_add` | 发送好友欢迎 | `friend_add_message`，为空不发送 |
+| `FRIEND_DEL` | `friend_del` | 只记录，回复默认关闭 | `enable_friend_remove_notice` |
 
----
+`group_member_add_message` 支持 `{user_id}`、`{member_openid}`、`{raw_user_id}`、`{union_openid}`、`{group_id}` 和 `{op_user_id}` 占位符。无法识别的占位符会原样保留。
 
-## 2. 自动事件总览
+### 2.2 仅日志/存储事件
 
-### 2.1 事件分类
-自动事件分为以下类别：
-- 群聊关系事件（机器人入群/退群、群消息设置、普通群成员加入/退出）
-- 单聊关系事件（好友添加/删除）
-- 频道/子频道事件（创建/更新/删除）
-- 频道成员事件（加入/更新/退出）
-- 表态与审核事件
-- 论坛事件
-- 消息撤回事件
+| 分组 | 平台事件 |
+| --- | --- |
+| `relation` | `GROUP_ADD_ROBOT`、`GROUP_DEL_ROBOT`、`FRIEND_ADD`、`FRIEND_DEL` |
+| `group_setting` | `GROUP_MSG_RECEIVE`、`GROUP_MSG_REJECT` |
+| `group_member` | `GROUP_MEMBER_ADD`、`GROUP_MEMBER_REMOVE` |
+| `guild` | `GUILD_CREATE`、`GUILD_UPDATE`、`GUILD_DELETE` |
+| `channel` | `CHANNEL_CREATE`、`CHANNEL_UPDATE`、`CHANNEL_DELETE` |
+| `guild_member` | `GUILD_MEMBER_ADD`、`GUILD_MEMBER_UPDATE`、`GUILD_MEMBER_REMOVE` |
+| `message_delete` | `PUBLIC_MESSAGE_DELETE`、`DIRECT_MESSAGE_DELETE` |
+| `reaction` | `MESSAGE_REACTION_ADD`、`MESSAGE_REACTION_REMOVE` |
+| `audit` | `MESSAGE_AUDIT_PASS`、`MESSAGE_AUDIT_REJECT` |
+| `forum` | `OPEN_FORUM_THREAD_CREATE/UPDATE/DELETE`、`OPEN_FORUM_POST_CREATE/DELETE`、`OPEN_FORUM_REPLY_CREATE/DELETE` |
 
-### 2.2 事件清单（按类别划分）
+表中的可回复事件也属于相应日志分组；自动回复开关与日志分组开关是两套独立判断。
 
-#### 2.2.1 表态事件
-| 平台事件类型 | 自动事件 key | 默认行为 |
-|---|---|---|
-| `MESSAGE_REACTION_ADD` | `message_reaction_add` | 仅日志 |
-| `MESSAGE_REACTION_REMOVE` | `message_reaction_remove` | 仅日志 |
+### 2.3 暂未启用的映射
 
-#### 2.2.2 审核事件
-| 平台事件类型 | 自动事件 key | 默认行为 |
-|---|---|---|
-| `MESSAGE_AUDIT_PASS` | `message_audit_pass` | 仅日志 |
-| `MESSAGE_AUDIT_REJECT` | `message_audit_reject` | 仅日志 |
+以下常量和解析准备仍保留，但没有加入 `AUTO_EVENT_MAP`：
 
-#### 2.2.3 论坛事件
-| 平台事件类型 | 自动事件 key | 默认行为 |
-|---|---|---|
-| `OPEN_FORUM_THREAD_CREATE` | `open_forum_thread_create` | 仅日志 |
-| `OPEN_FORUM_THREAD_UPDATE` | `open_forum_thread_update` | 仅日志 |
-| `OPEN_FORUM_THREAD_DELETE` | `open_forum_thread_delete` | 仅日志 |
-| `OPEN_FORUM_POST_CREATE` | `open_forum_post_create` | 仅日志 |
-| `OPEN_FORUM_POST_DELETE` | `open_forum_post_delete` | 仅日志 |
-| `OPEN_FORUM_REPLY_CREATE` | `open_forum_reply_create` | 仅日志 |
-| `OPEN_FORUM_REPLY_DELETE` | `open_forum_reply_delete` | 仅日志 |
+- `SUBSCRIBE_MESSAGE_STATUS`
+- `C2C_MSG_REJECT`、`C2C_MSG_RECEIVE`
+- `AUDIO_START`、`AUDIO_FINISH`、`AUDIO_ON_MIC`、`AUDIO_OFF_MIC`
+- `AUDIO_OR_LIVE_CHANNEL_MEMBER_ENTER`、`AUDIO_OR_LIVE_CHANNEL_MEMBER_EXIT`
 
-#### 2.2.4 其他事件
-| 平台事件类型 | 自动事件 key | 默认行为 |
-|---|---|---|
-| `GROUP_ADD_ROBOT` | `group_add_robot` | 可自动回复 |
-| `GROUP_DEL_ROBOT` | `group_del_robot` | 可自动回复 |
-| `GROUP_MSG_RECEIVE` | `group_msg_receive` | 仅日志 |
-| `GROUP_MSG_REJECT` | `group_msg_reject` | 仅日志 |
-| `GROUP_MEMBER_ADD` | `group_member_add` | 可自动回复 |
-| `GROUP_MEMBER_REMOVE` | `group_member_remove` | 仅日志 |
-| `FRIEND_ADD` | `friend_add` | 可自动回复 |
-| `FRIEND_DEL` | `friend_del` | 可自动回复 |
-| `GUILD_CREATE` | `guild_create` | 仅日志 |
-| `GUILD_UPDATE` | `guild_update` | 仅日志 |
-| `GUILD_DELETE` | `guild_delete` | 仅日志 |
-| `CHANNEL_CREATE` | `channel_create` | 仅日志 |
-| `CHANNEL_UPDATE` | `channel_update` | 仅日志 |
-| `CHANNEL_DELETE` | `channel_delete` | 仅日志 |
-| `GUILD_MEMBER_ADD` | `guild_member_add` | 仅日志 |
-| `GUILD_MEMBER_UPDATE` | `guild_member_update` | 仅日志 |
-| `GUILD_MEMBER_REMOVE` | `guild_member_remove` | 仅日志 |
-| `PUBLIC_MESSAGE_DELETE` | `channel_message_delete` | 仅日志 |
-| `DIRECT_MESSAGE_DELETE` | `channel_dm_message_delete` | 仅日志 |
+它们当前不会走自动事件回复/日志分组逻辑。
 
-### 2.3 暂时禁用事件（代码注释保留）
-以下事件已在代码中标注为“暂时禁用”，不会进入自动事件映射：
-- `SUBSCRIBE_MESSAGE_STATUS`（订阅状态）
-- `C2C_MSG_REJECT` / `C2C_MSG_RECEIVE`
-- `AUDIO_START` / `AUDIO_FINISH` / `AUDIO_ON_MIC` / `AUDIO_OFF_MIC`
-- `AUDIO_OR_LIVE_CHANNEL_MEMBER_ENTER` / `AUDIO_OR_LIVE_CHANNEL_MEMBER_EXIT`
+## 3. 处理流程
 
----
-
-## 3. 自动事件处理流程
-
-### 3.1 处理流程图
-```
-收到事件
-  └─ 判断是否在 AUTO_EVENT_MAP
-     ├─ 否 -> 进入普通消息/其他流程
-     └─ 是 -> 读取 auto_events 配置
-           ├─ 记录日志
-           ├─ 若为“仅日志”事件 -> 结束
-           └─ 若为“可回复”事件:
-                ├─ 场景过滤 (scenes)
-                ├─ 启用校验 (enabled)
-                ├─ 插件配置消息内容检查（为空则不发送）
-                └─ 发送自动回复
+```text
+WSS / Webhook payload
+  -> parse_event()
+  -> 去重与有效性检查
+  -> 按日志分组决定是否写插件 DB
+  -> handle_relation_event()
+       -> 输出自动事件日志
+       -> 系统事件直接消费
+       -> 可回复事件按配置发送文本
+  -> 非系统消息检查 new_user_welcome
+  -> 有效聊天消息 commit_event() 给 AstrBot
 ```
 
-### 3.2 “仅日志”与“可回复”的区别
-- **仅日志**: 事件触发后仅记录日志，不会发送任何消息。
-- **可回复**: 事件满足配置与开关条件时，会发送 `fallback_text` 文案。
+自动回复文本使用 `send_text_prefer_markdown()`：先尝试 QQ 原生 Markdown，失败后发送普通文本。
 
-当前**可回复**事件只有 4 个：
-- `group_add_robot`
-- `group_del_robot`
-- `friend_add`
-- `friend_del`
+## 4. 配置来源与优先级
 
----
+### 4.1 `templates/registry.yaml`
 
-## 4. 配置说明
+注册表提供自动事件的基础默认值：
 
-### 4.1 auto_events 配置（registry.yaml）
-路径: `templates/registry.yaml`
-
-配置结构示例：
 ```yaml
 auto_events:
   group_add_robot:
@@ -137,110 +85,67 @@ auto_events:
     log: true
 ```
 
-字段说明：
-| 字段 | 说明 |
-|---|---|
-| enabled | 是否启用此自动事件 |
-| template | 预留字段（当前未使用） |
-| fallback_text | 自动回复文本 |
-| log | 是否记录日志 |
-| scenes | 可选，限制触发场景 |
+| 字段 | 当前作用 |
+| --- | --- |
+| `enabled` | 控制使用注册表默认回复的事件是否启用；入群、成员欢迎、好友欢迎主要由插件文本是否为空决定 |
+| `template` | 预留字段，当前自动回复未使用模板发送 |
+| `fallback_text` | 退群、删好友等没有专用文本配置时的回复文本 |
+| `log` | 单事件日志/存储开关 |
+| `scenes` | 可选场景限制 |
 
-### 4.2 插件配置消息（Plugin Config）
-插件配置路径: `data/config/qq_restapi_config.json`  
-Schema 路径: `qq_restapi/_conf_schema.json`
+### 4.2 插件配置
 
-与以下自动事件直接相关：
-| 自动事件 key | 插件配置字段 | 说明 |
-|---|---|---|
-| group_add_robot | group_add_robot_message | 机器人自己被拉进群时的欢迎 |
-| group_member_add | group_member_add_message | 普通群成员加入群聊时的欢迎 |
-| group_del_robot | enable_group_remove_notice | 机器人退群通知 |
-| friend_add | friend_add_message | 好友添加欢迎 |
-| friend_del | enable_friend_remove_notice | 好友删除通知 |
+插件配置 schema 位于 `_conf_schema.json`，实际配置文件路径由 AstrBot 管理，不应在插件文档中假定固定文件名。
 
-说明：
-- 对 `group_add_robot` / `group_member_add` / `friend_add`：插件配置消息不为空才发送。
-- `group_add_robot_message` 和 `group_member_add_message` 是两类事件：前者是机器人自己进群，后者是群里有普通用户进群。
-- 其他事件仍遵循 `enabled=true` + 对应开关为 `true` 的规则。
+插件配置优先决定以下内容：
 
-### 4.3 日志分组开关（auto_event_log_groups）
-插件配置路径: `data/config/qq_restapi_config.json`  
-Schema 路径: `qq_restapi/_conf_schema.json`
+- `group_add_robot_message`
+- `group_member_add_message`
+- `friend_add_message`
+- `new_user_welcome_message`
+- `enable_group_remove_notice`
+- `enable_friend_remove_notice`
+- `auto_event_log_groups`
 
-说明：
-- 插件配置优先级最高
-- 若插件配置缺失该字段，则回退读取 `templates/registry.yaml` 中的默认值
+对 `group_add_robot`、`group_member_add`、`friend_add`，文本为空就不发送；`group_del_robot` 和 `friend_del` 还要求注册表事件已启用且对应布尔开关为 `true`。
 
-配置结构示例：
-```json
-{
-  "auto_event_log_groups": {
-    "relation": true,
-    "group_setting": true,
-    "group_member": true,
-    "guild": true,
-    "channel": true,
-    "guild_member": true,
-    "message_delete": true,
-    "reaction": true,
-    "audit": true,
-    "forum": true
-  }
-}
-```
+### 4.3 日志分组
 
-字段说明：
-| 字段 | 说明 |
-|---|---|
-| relation | 机器人入群/退群、好友添加/删除日志分组 |
-| group_setting | 群消息接收/拒收设置日志分组 |
-| group_member | 普通群成员加入、退出日志分组 |
-| guild | 频道创建、更新、删除日志分组 |
-| channel | 子频道创建、更新、删除日志分组 |
-| guild_member | 频道成员加入、更新、删除日志分组 |
-| message_delete | 频道消息撤回、频道私信撤回日志分组 |
-| reaction | 表态事件日志分组 |
-| audit | 审核事件日志分组 |
-| forum | 论坛事件日志分组 |
+`auto_event_log_groups` 的 10 个分组默认都是 `true`。判断优先级为：
 
-说明：
-- 分组 `false` 时，该分组内事件将不输出日志。
-- 分组配置缺失时，默认记录日志。
+1. 插件配置中该分组的布尔值；
+2. `templates/registry.yaml` 的分组 `log`；
+3. 缺失时默认允许记录。
 
----
+分组关闭后，事件仍会被接收和消费，但不会输出自动事件日志，也不会写入插件 `EventLog`。是否发送自动回复继续由事件自身配置决定。
 
-## 5. new_user_welcome 说明
+## 5. `new_user_welcome`
 
-### 5.1 定义
-`new_user_welcome` 是“首次聊天欢迎逻辑”，不是平台事件，不在 `AUTO_EVENT_MAP` 中。
+`new_user_welcome` 在以下条件同时满足时触发：
 
-### 5.2 触发条件
-以下条件全部满足时才触发：
-- 当前事件 **不是**自动事件（即不在 `AUTO_EVENT_MAP`）
-- 通过对话管理器判断该用户**没有历史会话**
-- 插件配置 `new_user_welcome_message` 不为空
+- 当前消息不是 `AUTO_EVENT_MAP` 中的系统事件；
+- 当前场景符合注册表 `scenes`，默认只包含 `group`；
+- `new_user_welcome_message` 不为空；
+- AstrBot 对话管理器中当前 `unified_msg_origin` 尚无 conversation；
+- 同一事件尚未执行过首次用户检查。
 
-### 5.3 行为特点
-- 发送 `fallback_text` 欢迎文案
-- **不写入对话历史**（避免覆盖真实对话）
-- 支持 `scenes` 限制触发场景（默认示例为 `group`）
+未 @ 机器人的 `GROUP_MESSAGE_CREATE` 不触发首次欢迎。欢迎消息本身不会写入 AstrBot 对话历史，也不会替代随后正常提交的用户消息。
 
----
+## 6. 插件数据库与 AstrBot 对话历史
 
-## 6. 日志输出规则
+需要区分两类存储：
 
-日志字段会包含以下关键信息：
-- `Union OpenID` / `Raw OpenID`
-- 操作人 ID（如有）
-- 群ID / 频道ID / 子频道ID
-- 特殊事件补充信息（如撤回消息ID、审核ID、表态emoji_id等）
+- 插件 SQLite：`runtime/dispatch.py` 通过 `db/service.py` 记录事件、身份和场景信息，数据库位于 AstrBot 插件数据目录下的 `qq_restapi/qq_restapi.db`。
+- AstrBot conversation：只有正常提交的聊天消息以及全量群消息上下文兜底会进入聊天上下文；系统自动事件不会作为聊天消息提交。
 
-频道相关事件在日志中会同时打印 Union/Raw OpenID（若可用）。
+自动事件日志分组控制的是插件日志和插件数据库事件记录，不等同于 AstrBot 的对话历史开关。
 
----
+## 7. 实现依据
 
-## 7. 参考来源
+- `runtime/dispatch.py`
 - `runtime/auto_events.py`
 - `runtime/message_parser.py`
+- `db/database.py`
+- `db/service.py`
 - `templates/registry.yaml`
+- `_conf_schema.json`

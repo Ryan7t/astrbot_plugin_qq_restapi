@@ -1,8 +1,8 @@
-# QQ REST API 插件现代化对比与接入草案
+# QQ REST API 插件现代化对比与实施记录
 
-> 目的：把当前 `qq_restapi` 插件、`wanbot` 私有命令、ElainaBot_v2、AstrBot 本体、以及最新 QQ/AstrBot 官方规则放在一起对齐，先讨论“接入什么、怎么接、放在哪一层”，再动核心代码。
+> 目的：记录 `qq_restapi` 插件与 `wanbot` 私有命令、ElainaBot_v2、AstrBot 本体及 QQ/AstrBot 官方规则的对比结论，并跟踪已经落地的现代化改造。
 >
-> 日期：2026-06-23
+> 初始日期：2026-06-23；状态复核：2026-07-14
 
 ## 参考来源
 
@@ -23,20 +23,19 @@
 
 当前插件不应该整体迁移到 ElainaBot_v2 架构。更合理的路线是：继续保持 AstrBot 平台适配器身份，只把 v2 中“更成熟的 QQ 传输、事件解析、发送细节”拆出来吸收。
 
-当前阶段最急的三件事：
+本轮最初确定的三件事（现均已完成）：
 
 1. 把 `wanbot` 里“优先 Markdown，失败后普通文本重试”的写法下沉到 `qq_restapi` 核心发送层。
 2. 默认接入 `GROUP_MESSAGE_CREATE` 全量群消息：QQ 管理后台发来什么，插件就正常解析、提交给 AstrBot、并确保对话数据不遗漏。
 3. 补齐自动事件日志分组开关，尤其是频道成员加入/删除/更新、频道/子频道、消息撤回等事件。
 
-当前阶段明确不做：
+本轮初始范围明确不做（其中全量群回复策略后来作为第三阶段独立完成）：
 
 - 不做群白名单。
 - 不做群备注/群别名。
-- 不做“仅记录日志不进入 AstrBot”的全量群消息模式。
+- 不做“仅记录插件日志且完全不进入 AstrBot”的全量群消息模式。
 - 不做 `full_group_message.enabled` 这种插件侧开关。
-- 不做 `at_self`、`log_only`、`all` 这些全量群消息插件侧模式。
-- 不做图床配置重构。
+- 不采用旧草案的 `at_self`、`log_only`、`all` 命名；第三阶段改为 `full_group_reply` 五种明确模式。
 - 不在本阶段重构按钮消息整体体系。
 
 ## 第一阶段实现状态
@@ -92,14 +91,14 @@ AstrBot 本体的“回复时引用发送人消息”和“回复时 @ 发送人
 | WSS READY/RESUMED 过滤 | 已实现 | Gateway 的 `READY` 只用于记录 `session_id`，`RESUMED` 只记录恢复成功，不再作为普通事件交给 AstrBot。 |
 | WSS resume/reconnect | 已实现 | 收到 `INVALID_SESSION` 时遵循 QQ 返回的 `d` 判断是否可恢复；可恢复则保留 session/seq 走 resume，不可恢复则清空后重新 identify。`RECONNECT` 会主动重连。 |
 | WSS 背压 | 已实现 | WSS 事件进入有界队列，默认最多等待 256 条；下游处理变慢时不再无限制创建任务，同时保持事件处理顺序。 |
-| WSS/Webhook 提交一致性 | 已实现 | 两个入口都只把有效群/私聊消息提交给 AstrBot；生命周期、频道变更、审核、表态等系统事件由自动事件逻辑记录/处理，不再额外混入普通消息流水线。 |
+| WSS/Webhook 提交一致性 | 已实现并经实机验证 | 两个入口都只把有效群/私聊消息提交给 AstrBot；生命周期、频道变更、审核、表态等系统事件由自动事件逻辑记录/处理，不再额外混入普通消息流水线。WSS 与 Webhook 两种接入模式均已完成实际运行验证。 |
 
 ## 几个容易混淆的词
 
 | 说法 | 通俗解释 | 本次结论 |
 | --- | --- | --- |
-| Markdown 优先发送 | 机器人要发一段文字时，先按 QQ 原生 Markdown 发；如果 QQ 返回失败，再按普通文本发。 | 当前阶段要做，并放到核心发送层。 |
-| 普通文本兜底 | Markdown 发不出去时，至少把同样内容作为普通文字发出去，不让用户收不到回复。 | 当前阶段要做。 |
+| Markdown 优先发送 | 机器人要发一段文字时，先按 QQ 原生 Markdown 发；如果 QQ 返回失败，再按普通文本发。 | 已放到核心发送层。 |
+| 普通文本兜底 | Markdown 发不出去时，至少把同样内容作为普通文字发出去，不让用户收不到回复。 | 已实现。 |
 | 按钮降级 | 如果“Markdown + 按钮”失败，先改成“Markdown 无按钮”；如果还失败，再普通文本。 | 后续按钮专项做；当前文档先记录原则。 |
 | `prefer_markdown_for_text` | 这是之前草案里的配置名，意思只是“普通文字优先用 Markdown 发”。 | 不作为当前用户配置项。当前阶段直接默认启用 Markdown 优先发送。 |
 | `dispatch_mode` | 之前草案里指“全量群消息收到后，插件再决定是只记日志、只处理 @、还是全部当作 @ 处理”。 | 当前阶段删除这个设计。后续可以作为可选增强重新加入。 |
@@ -176,7 +175,6 @@ AstrBot 本体的“回复时引用发送人消息”和“回复时 @ 发送人
 | 全量群消息 | 未明确支持 `GROUP_MESSAGE_CREATE` 常量和解析。 | 不处理。 | 支持 `GROUP_MESSAGE_CREATE`。 | 默认接入：收到就解析、记录身份、提交给 AstrBot。 |
 | AstrBot 对话存储 | 非 LLM 回复时插件有 `_store_history_if_needed()`；LLM 场景由 AstrBot 内部保存。 | 业务命令只关心回复。 | 自己有日志库，不依赖 AstrBot。 | 全量群消息不能只写插件 event_log，要保证进入 AstrBot 对话历史链路。 |
 | 自动事件日志开关 | 只有 `reaction`、`audit`、`forum` 分组。 | 不处理。 | 有自己的 lifecycle 日志。 | 补充分组：`guild`、`channel`、`guild_member`、`message_delete`、`group_setting` 等。 |
-| 图床 | 核心里有 QQ/Bilibili 图床。 | 业务可能调用。 | 独立 `image_hosting` 模块。 | 暂时搁置，不纳入本轮。 |
 
 ## Markdown 优先发送应如何下沉
 
@@ -244,7 +242,7 @@ if not message_id:
 
 ### 关键口径
 
-全量群消息由群聊管理者在 QQ 机器人管理后台配置。插件端不再提供“只听 @、全量、白名单、仅日志”等二次模式。
+全量群消息是否推送由群聊管理者在 QQ 机器人管理后台配置。插件端不提供“只听 @/全量”的接收开关、群白名单或完全绕过 AstrBot 的仅日志模式；收到消息后的主动回复行为由 `full_group_reply` 控制。
 
 插件要做的是：
 
@@ -265,7 +263,7 @@ if not message_id:
 | QQ 后台切换为全量群消息 | 插件会收到 `GROUP_MESSAGE_CREATE`，按普通群消息处理。 |
 | 后台从仅 @ 切到全量 | 插件无需改配置，事件类型变化后仍正常解析和写入。 |
 | 后台从全量切回仅 @ | 插件无需改配置，收不到的消息自然不会处理。 |
-| 群消息没有 @ 机器人 | 如果 QQ 后台已经发给插件，就正常进入 AstrBot 事件链路；是否回复交给 AstrBot 原本的唤醒逻辑决定。 |
+| 群消息没有 @ 机器人 | 如果 QQ 后台已经发给插件，就正常进入 AstrBot 事件链路；默认 `normal` 只补写上下文，其他 `full_group_reply` 模式可主动触发回复。 |
 
 ### 不再使用这些配置
 
@@ -553,13 +551,13 @@ auto_event_log_groups:
 
 | 能力 | 当前插件 | v2 | 建议 |
 | --- | --- | --- | --- |
-| `event.reply(text)` | 有，普通回复默认偏纯文本，LLM 场景部分 Markdown 优先。 | 有，按配置默认 Markdown。 | 当前插件改成默认 Markdown 优先、普通文本兜底。 |
+| `event.reply(text)` | 已默认 Markdown 优先、普通文本兜底；显式 `use_markdown=False` 时纯文本。 | 有，按配置默认 Markdown。 | 当前插件已完成下沉。 |
 | `reply_markdown(template_id, params)` | 有。 | 无同名一等接口。 | 保留。 |
 | `reply_markdown_aj(text)` | 有。 | 无。 | 保留但不作为默认发送路径。 |
 | `reply_image/voice/video` | 有。 | 有。 | 暂不动。 |
 | `reply_file` | 当前缺少一等接口。 | 有。 | 可作为后续增强，不是第一优先级。 |
 | `reply_ark` | 有。 | 有。 | 保留。 |
-| `send_by_session` | 有，但目前只发普通文本。 | v2 有 `send_to_*`。 | 先让 `send_by_session` 也复用 Markdown 优先发送。 |
+| `send_by_session` | WSS/Webhook 均已复用 Markdown 优先发送。 | v2 有 `send_to_*`。 | 已完成。 |
 | `message_reference_id` | 已接入 AstrBot `Reply` -> QQ `message_reference` 的发送路径。 | v2 支持。 | 当前优先使用 `message_scene.ext` 中的 `msg_idx`/`REFIDX`，再兜底普通消息 ID。 |
 | `prompt_buttons/font_size` | 当前不完整。 | v2 有。 | 后续按钮专项处理。 |
 
@@ -569,7 +567,7 @@ auto_event_log_groups:
 | --- | --- | --- | --- |
 | 单聊 `C2C_MESSAGE_CREATE` | 支持。 | 支持。 | 保留。 |
 | 群 @ `GROUP_AT_MESSAGE_CREATE` | 支持。 | 支持。 | 保留。 |
-| 群全量 `GROUP_MESSAGE_CREATE` | 缺口。 | 支持。 | 当前阶段必须新增，默认处理。 |
+| 群全量 `GROUP_MESSAGE_CREATE` | 已支持解析、提交、上下文写入与五种回复模式。 | 支持。 | 已完成。 |
 | 频道 @ `AT_MESSAGE_CREATE` | 支持。 | 支持。 | 保留。 |
 | 频道消息 `MESSAGE_CREATE` | 当前作为频道消息支持。 | 支持。 | 保留。 |
 | 频道私信 `DIRECT_MESSAGE_CREATE` | 支持。 | 支持。 | 保留。 |
@@ -596,15 +594,14 @@ auto_event_log_groups:
 2. 已加入基本去重：`message_id`/`event_id` + TTL。
 3. 已从 v2 借鉴 WSS reconnect/resume 和事件处理背压；当前实现使用有界队列保持事件顺序。
 
-### 第三阶段：按钮专项
+### 后续阶段：按钮专项（未实现）
 
 1. 重构“Markdown + 按钮”的发送降级：有按钮失败先去按钮，保留 Markdown。
 2. 设计按钮点击的存储形态：至少保留 button id/data、用户、场景、原消息 ID。
-3. 评估是否需要扩展 AstrBot 通用组件，或只在插件 DB 中保存按钮交互 metadata。
+3. 在“不修改 AstrBot 框架源码”的边界下，优先评估只在插件 DB 中保存按钮交互 metadata；只有框架未来提供正式扩展点时再考虑通用组件方案。
 
 ### 暂时搁置
 
-- 图床模块化。
 - 群备注/群别名。
 - v2 Web 面板。
 - v2 插件系统。

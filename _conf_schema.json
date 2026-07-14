@@ -69,7 +69,7 @@
     "description": "事件调试日志",
     "type": "bool",
     "default": false,
-    "hint": "开启后输出原始事件和解析结果"
+    "hint": "开启后输出事件类型、字段摘要和解析结果"
   },
   "full_group_reply": {
     "description": "全量群消息回复策略",
@@ -162,7 +162,7 @@
     "description": "群成员入群欢迎消息",
     "type": "string",
     "default": "",
-    "hint": "群里有普通用户加入时发送；为空则不发送。可用 {user_id} 和 {group_id} 占位符"
+    "hint": "群里有普通用户加入时发送；为空则不发送。支持 {user_id}、{member_openid}、{raw_user_id}、{union_openid}、{group_id}、{op_user_id}"
   },
   "friend_add_message": {
     "description": "好友添加欢迎消息",
@@ -189,7 +189,7 @@
     "hint": "控制 friend_del 自动回复"
   },
   "auto_event_log_groups": {
-    "description": "自动事件日志分组开关",
+    "description": "自动事件日志与插件事件存储分组开关",
     "type": "object",
     "items": {
       "reaction": {

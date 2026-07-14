@@ -3,11 +3,11 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Iterable, Optional, Sequence, Tuple
 
 from astrbot import logger
 
-from .token_manager import TokenManager
+from .token_manager import TokenManager, TokenManagerError
 from .httpx_pool import get_async_client
 
 _DEFAULT_API_BASE = "https://api.sgroup.qq.com"
@@ -38,6 +38,23 @@ _MARKDOWN_PATTERNS = [
 
 def _msg_seq() -> int:
     return random.randint(10000, 999999)
+
+
+def build_markdown_params(
+    keys: Iterable[str],
+    values: Iterable[object],
+) -> list[dict]:
+    params = []
+    for key, value in zip(keys, values):
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            vals = [str(item) for item in value if item is not None]
+        else:
+            vals = [str(value)]
+        if vals:
+            params.append({"key": key, "values": vals})
+    return params
 
 
 @dataclass
@@ -85,22 +102,55 @@ class QQRestAPISender:
         self.api_base = _SANDBOX_API_BASE if self.is_sandbox else _DEFAULT_API_BASE
 
     async def _post(self, endpoint: str, payload: dict, retry: int = 1) -> SendResult:
-        headers = await self.token_manager.auth_headers()
-        client = await get_async_client()
-        resp = await client.post(
+        return await self._post_url(
             f"{self.api_base}{endpoint}",
-            json=payload,
-            headers=headers,
-            timeout=20,
+            payload,
+            retry=retry,
+            log_target=endpoint,
         )
+
+    async def _post_url(
+        self,
+        api_url: str,
+        payload: dict,
+        *,
+        retry: int = 1,
+        log_target: str | None = None,
+    ) -> SendResult:
+        target = log_target or api_url
+        try:
+            headers = await self.token_manager.auth_headers()
+        except TokenManagerError as exc:
+            logger.warning("QQ REST API Token 获取失败: %s", exc)
+            return SendResult(
+                ok=False,
+                message=str(exc),
+                transport_error=str(exc),
+            )
+
+        try:
+            client = await get_async_client()
+            resp = await client.post(
+                api_url,
+                json=payload,
+                headers=headers,
+                timeout=20,
+            )
+        except Exception as exc:
+            logger.warning("QQ REST API 请求失败: target=%s error=%s", target, exc)
+            return SendResult(
+                ok=False,
+                message=str(exc),
+                transport_error=str(exc),
+            )
 
         raw_text = resp.text
         try:
             data = resp.json()
         except Exception:
             logger.warning(
-                "QQ REST API 返回无效 JSON: endpoint=%s, status=%s, body=%s",
-                endpoint,
+                "QQ REST API 返回无效 JSON: target=%s, status=%s, body=%s",
+                target,
                 resp.status_code,
                 raw_text[:200],
             )
@@ -126,8 +176,25 @@ class QQRestAPISender:
                     ignored=True,
                 )
             if code == _TOKEN_EXPIRED_CODE and retry > 0:
-                await self.token_manager.refresh()
-                return await self._post(endpoint, payload, retry=retry - 1)
+                try:
+                    await self.token_manager.refresh()
+                except TokenManagerError as exc:
+                    logger.warning("QQ REST API Token 刷新失败: %s", exc)
+                    return SendResult(
+                        ok=False,
+                        http_status=resp.status_code,
+                        data=data,
+                        raw=raw_text,
+                        code=code,
+                        message=str(exc),
+                        transport_error=str(exc),
+                    )
+                return await self._post_url(
+                    api_url,
+                    payload,
+                    retry=retry - 1,
+                    log_target=target,
+                )
             logger.warning("QQ REST API 发送失败: code=%s, message=%s", code, message)
             return SendResult(
                 ok=False,
@@ -292,6 +359,35 @@ class QQRestAPISender:
             params.append({"key": keys_list[i], "values": ["\u200B"]})
         return params
 
+    def _build_markdown_template_payload(
+        self,
+        template_id: str,
+        params: Sequence[dict],
+        *,
+        msg_id: Optional[str] = None,
+        keyboard: Optional[dict] = None,
+        hide_avatar_and_center: bool = False,
+        event_id: Optional[str] = None,
+        message_reference: Optional[dict] = None,
+    ) -> dict:
+        payload = {
+            "msg_type": 2,
+            "msg_seq": _msg_seq(),
+            "markdown": {
+                "custom_template_id": template_id,
+                "params": list(params),
+            },
+        }
+        if hide_avatar_and_center:
+            payload["markdown"].setdefault("style", {})["layout"] = (
+                "hide_avatar_and_center"
+            )
+        self._apply_ids(payload, msg_id, event_id)
+        self._apply_message_reference(payload, message_reference)
+        if keyboard:
+            payload["keyboard"] = self._process_button_parameter(keyboard) or keyboard
+        return payload
+
     async def send_plain(
         self,
         target: dict,
@@ -386,18 +482,34 @@ class QQRestAPISender:
         message_reference: Optional[dict] = None,
     ):
         endpoint, allow_keyboard = self._build_endpoint(target)
-        payload = {
-            "msg_type": 2,
-            "msg_seq": _msg_seq(),
-            "markdown": {"custom_template_id": template_id, "params": list(params)},
-        }
-        if hide_avatar_and_center:
-            payload["markdown"].setdefault("style", {})["layout"] = "hide_avatar_and_center"
-        self._apply_ids(payload, msg_id, event_id)
-        self._apply_message_reference(payload, message_reference)
-        if keyboard and allow_keyboard:
-            payload["keyboard"] = self._process_button_parameter(keyboard) or keyboard
+        payload = self._build_markdown_template_payload(
+            template_id,
+            params,
+            msg_id=msg_id,
+            keyboard=keyboard if allow_keyboard else None,
+            hide_avatar_and_center=hide_avatar_and_center,
+            event_id=event_id,
+            message_reference=message_reference,
+        )
         return await self._post(endpoint, payload)
+
+    async def send_markdown_template_url(
+        self,
+        api_url: str,
+        template_id: str,
+        params: Sequence[dict],
+        *,
+        msg_id: Optional[str] = None,
+        keyboard: Optional[dict] = None,
+    ) -> SendResult:
+        """兼容旧公共 API：向调用方提供的完整 URL 发送 Markdown 模板。"""
+        payload = self._build_markdown_template_payload(
+            template_id,
+            params,
+            msg_id=msg_id,
+            keyboard=keyboard,
+        )
+        return await self._post_url(api_url, payload)
 
     async def send_markdown_aj(
         self,

@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 from binascii import Error as BinasciiError
 from typing import Any
 
@@ -9,10 +8,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from astrbot import logger
 from astrbot.core.platform.webhook_server import FastAPIWebhookServer
-
-# remove logger handler
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
 
 
 _SIGNATURE_HEADER = "X-Signature-Ed25519"

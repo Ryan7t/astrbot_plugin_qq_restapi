@@ -15,10 +15,9 @@ AstrBot 框架内置了基于 `botpy` SDK 的 `qq_official` / `qq_official_webho
 | Markdown | 基础 Markdown 降级 | 原生 Markdown + QQ 模板 + AJ 万能模板 |
 | 按钮面板 | 不支持 | 动态按钮构建，支持权限控制 |
 | ARK 卡片 | 不支持 | 支持 Template 23/24/37 |
-| 图片床 | 不支持 | QQ 官方图床 + Bilibili 图床 |
 | 模板系统 | 无 | 多源注册、YAML/JSON、参数化渲染、热加载 |
 | 数据库 | 无 | SQLite 事件日志 + 用户身份/场景追踪 |
-| 业务扩展 | 需修改框架代码 | 支持挂载私有命令目录，独立管理 |
+| 业务扩展 | 需按框架插件机制扩展 | 可在插件内挂载私有扩展，当前兼容固定命令集 |
 
 简单来说：如果只需要基础的消息收发，使用框架内置适配器即可；如果需要更丰富的消息类型、自动事件处理、模板系统或业务扩展能力，推荐使用本插件。
 
@@ -30,9 +29,8 @@ AstrBot 框架内置了基于 `botpy` SDK 的 `qq_official` / `qq_official_webho
 - **自动事件处理**：入群欢迎、好友添加、首次对话欢迎等，支持配置文案和场景过滤
 - **Markdown 模板系统**：多源注册、YAML/JSON 格式、`{{key}}` 参数化渲染、文件热加载
 - **按钮/键盘构建**：动态按钮面板，支持管理员/指定用户/指定角色权限控制
-- **图片床**：QQ 官方子频道图床 + Bilibili 图床双通道
 - **数据持久化**：SQLite（WAL 模式），自动记录事件日志、用户身份、场景映射
-- **私有命令目录**：支持挂载独立的业务命令包，不影响公开仓库代码
+- **私有扩展兼容**：可挂载 `private_bot/` 或 `wanbot/` 的既有业务命令和模板，不修改 AstrBot 框架
 
 ## 安装
 
@@ -61,18 +59,21 @@ git clone <本仓库地址> qq_restapi
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `group_add_robot_message` | 入群欢迎消息（为空则不发送） | `欢迎加入，本机器人已入群～` |
+| `group_member_add_message` | 普通群成员入群欢迎（为空则只记录，可用用户/群占位符） | 空 |
 | `friend_add_message` | 好友添加欢迎消息（为空则不发送） | `你好，我是小万，欢迎添加好友～` |
 | `new_user_welcome_message` | 首次对话欢迎消息（为空则不发送） | `欢迎第一次和我聊天～` |
 | `enable_group_remove_notice` | 退群提示开关 | `false` |
 | `enable_friend_remove_notice` | 删好友提示开关 | `false` |
-| `use_union_id_for_group` | 群聊/单聊优先使用 Union OpenID | `false` |
-| `use_union_id_for_channel` | 频道场景优先使用 Union OpenID | `false` |
+| `use_union_id_for_group` | 群聊/单聊优先使用 Union OpenID | `true` |
+| `use_union_id_for_channel` | 频道场景优先使用 Union OpenID | `true` |
 | `markdown_aj_template_id` | AJ 万能模板 ID | 空 |
 | `markdown_aj_keys` | AJ 万能模板参数键名（逗号分隔） | 空 |
-| `image_bed_channel_id` | QQ 图床子频道 ID | 空 |
-| `bilibili_image_bed_config` | Bilibili 图床配置（enabled/csrf_token/sessdata） | 空 |
 | `bot_api_base_url` | 私有命令业务后端 API 地址 | 空 |
-| `debug_event_log` | 输出原始事件调试日志 | `false` |
+| `debug_event_log` | 输出事件类型、字段摘要和解析结果 | `false` |
+| `auto_event_log_groups` | 自动事件日志/插件事件存储分组开关 | 10 个分组均为 `true` |
+| `full_group_reply` | 全量群消息回复策略，默认非 @ 只入上下文 | `mode: normal` |
+
+`full_group_reply` 支持 `normal`、`random_reply`、`all_as_at`、`smart_reply`、`smart_random`，完整参数见 [全量群消息回复模式说明](docs/full_group_reply_modes.md)。自动事件配置见 [自动事件说明](docs/auto_events_guide.md)。
 
 ### Webhook 模式额外配置
 
@@ -80,8 +81,10 @@ git clone <本仓库地址> qq_restapi
 |--------|------|--------|
 | `unified_webhook_mode` | 统一 Webhook 入口模式 | `true` |
 | `webhook_uuid` | Webhook UUID（自动生成） | 空 |
-| `port` | 独立服务器端口 | `6200` |
-| `callback_server_host` | 监听地址 | `0.0.0.0` |
+
+当前 Webhook 适配器只支持统一入口模式。回调地址由 AstrBot 根据 `webhook_uuid` 展示和路由，插件复用框架的 `FastAPIWebhookServer`，不需要单独启动 Quart 服务。
+
+平台配置模板中仍保留 `port`、`callback_server_host` 和 `path` 作为历史兼容字段；统一入口模式不会使用它们。
 
 ## 消息类型
 
@@ -100,13 +103,13 @@ git clone <本仓库地址> qq_restapi
 
 ## 支持的事件类型
 
-**消息事件**：群 AT 消息、C2C 私聊、频道 @消息、频道消息、频道私聊
+**消息事件**：群 AT 消息、全量群消息、C2C 私聊、频道 @消息、频道消息、频道私聊
 
 **关系事件**：机器人入群/退群、好友添加/删除
 
 **频道事件**：频道创建/更新/删除、子频道创建/更新/删除
 
-**成员事件**：频道成员加入/移除
+**成员事件**：普通群成员加入/退出、频道成员加入/更新/移除
 
 **互动事件**：消息表态添加/移除、消息审核通过/拒绝
 
@@ -114,11 +117,11 @@ git clone <本仓库地址> qq_restapi
 
 **其他**：群消息接收/拒绝设置、消息撤回等
 
-## 私有命令目录
+## 私有扩展目录
 
-插件支持挂载私有命令目录来扩展业务指令，适合在开源核心能力之上叠加个性化功能。
+插件可以挂载私有目录来承载现有业务指令和模板，适合在开源核心能力之上叠加个性化功能。所有扩展仍通过 AstrBot 插件机制注册，不需要修改 AstrBot 框架源码。
 
-插件启动时自动检测目录下的 `private_bot/` 或自定义目录名（如 `wanbot/`），若存在且包含 `commands/` 子目录，则自动加载其中的指令、模板和素材。
+当前实现只检测 `private_bot/` 和 `wanbot/` 两个候选目录；存在 `commands/` 子目录时，`main.py` 会加载代码中明确列出的既有命令模块，并将私有 `templates/` 注册为外部模板源。它不是扫描任意目录、任意 Python 文件的通用命令自动发现器。
 
 ```
 qq_restapi/
@@ -131,13 +134,13 @@ qq_restapi/
     └── assets/          ← 静态素材
 ```
 
-建议将私有目录作为独立私有 Git 仓库管理。如启用了其中的业务命令，需配置 `bot_api_base_url`。
+建议将私有目录作为独立私有 Git 仓库管理。只有依赖私有后端的命令才需要配置 `bot_api_base_url`。
 
 ## 指令开发
 
-本插件提供的是平台适配器核心能力，不包含具体的业务指令。你可以根据自己的需求自行开发指令，也可以借助 AI 大模型（如 Claude、ChatGPT 等）辅助生成指令代码。
+本插件公开核心主要提供平台适配器能力；仓库中的可选私有目录可能包含本地业务指令。新增通用指令时，仍应使用 AstrBot 提供的命令装饰器显式注册。
 
-指令遵循 async generator 模式，在 `commands/` 目录下创建独立文件：
+指令实现可按 async generator 拆分，例如在私有扩展的 `commands/` 目录下创建独立文件：
 
 ```python
 # commands/my_command.py
@@ -149,7 +152,7 @@ async def my_command_impl(plugin, event):
         event.stop_event()
 ```
 
-然后在 `main.py` 中注册：
+然后在插件类中注册：
 
 ```python
 @filter.command("我的指令")
@@ -168,15 +171,39 @@ main.py                  ← 插件入口：注册、初始化、指令定义
 ├── adapters/            ← 平台适配器
 │   ├── qq_restapi_adapter.py         WebSocket Gateway 适配器
 │   ├── qq_restapi_webhook_adapter.py Webhook 适配器
-│   ├── qq_restapi_webhook_server.py  Webhook HTTP 服务器（Quart + Ed25519 验签）
+│   ├── qq_restapi_webhook_server.py  Webhook 回调处理（FastAPIWebhookServer + Ed25519 验签）
 │   └── ws_client.py                  WebSocket 客户端（心跳/identify/resume）
-├── core/qq/             ← QQ API 封装（无状态工具层）
+├── core/qq/             ← 复用 runtime 的公共 API 薄兼容层
 ├── runtime/             ← 运行时核心（事件解析、消息发送、Token 管理、模板系统）
-├── db/                  ← 数据库层（SQLModel + SQLite WAL）
+├── db/                  ← 插件自有数据库层（SQLModel + SQLite WAL）
 ├── utils/               ← 工具（场景识别）
 ├── templates/           ← Markdown 模板文件 + registry.yaml
 └── docs/                ← 开发文档
 ```
+
+## 自动化测试
+
+测试不连接真实 QQ，也不启动 AstrBot 服务，但需要使用 AstrBot 项目的虚拟环境以取得框架依赖：
+
+```powershell
+$env:PYTHONPATH="<AstrBot根目录>;<AstrBot根目录>\data\plugins"
+<AstrBot根目录>\venv\Scripts\python.exe -B -m unittest discover -s tests -v
+```
+
+## 设计参考与致谢
+
+本插件始终定位为 AstrBot 的 QQ 官方平台适配器：QQ 侧的 WebSocket/Webhook 接入、事件解析和 REST API 发送由插件负责；消息事件流水线、插件调度、会话与对话管理、上下文存储、LLM 调用等能力继续复用 AstrBot，不将其改造成一套独立机器人框架。
+
+本项目早期首先参考了 [ElainaBot v1](https://github.com/ElainaCore/ElainaBot) 的 QQ 官方接口封装与机器人功能设计；在后续传输层和发送层的现代化过程中，又参考了 [ElainaBot v2](https://github.com/ElainaCore/ElainaBot_v2) 的部分封装体系和实现思路，包括：
+
+- QQ 官方 WebSocket/Webhook 双接入的组织方式；
+- Gateway 心跳、重连、Resume 和有界分发队列；
+- 事件解析、发送 payload 与 Token 管理的分层；
+- Markdown、媒体消息和按钮构造等 QQ 官方能力的接口设计。
+
+本项目没有整体迁移 ElainaBot v1/v2 的独立框架、插件市场、Web 管理面板或存储体系，而是选择性吸收适合平台适配器的实现经验，并保持对 AstrBot 事件、会话和插件生态的依赖。按钮发送降级与交互记录等能力仍属于后续专项，不代表当前已经完整迁移参考项目的按钮体系。
+
+感谢 ElainaBot v1 与 ElainaBot v2 项目提供的开源实现与设计参考。
 
 ## 开源协议
 

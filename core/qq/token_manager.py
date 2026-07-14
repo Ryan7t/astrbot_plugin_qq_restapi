@@ -1,57 +1,40 @@
-import time
+from contextvars import ContextVar
 
-from ...runtime.httpx_pool import get_async_client
+from ...runtime.token_manager import TokenManager, TokenManagerError
 
-TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
-REFRESH_BUFFER = 60
 
-_TOKEN_CACHE = {"token": "", "expire": 0}
-_LAST_ERROR = ""
+_TOKEN_MANAGERS: dict[tuple[str, str], TokenManager] = {}
+_LAST_ERROR: ContextVar[str] = ContextVar(
+    "qq_restapi_legacy_token_error",
+    default="",
+)
+
+
+def get_token_manager(appid: str, secret: str) -> TokenManager:
+    """返回供旧公共 API 复用的 runtime TokenManager 实例。"""
+    cache_key = (appid, secret)
+    manager = _TOKEN_MANAGERS.get(cache_key)
+    if manager is None:
+        manager = TokenManager(appid, secret)
+        _TOKEN_MANAGERS[cache_key] = manager
+    return manager
 
 
 async def get_access_token(appid: str, secret: str) -> str:
-    global _LAST_ERROR
-
+    """兼容旧接口，内部委托 runtime.TokenManager。"""
     if not appid or not secret:
-        _LAST_ERROR = "缺少 appid 或 secret"
-        return ""
-
-    now = time.time()
-    if _TOKEN_CACHE["token"] and _TOKEN_CACHE["expire"] > now + REFRESH_BUFFER:
-        return _TOKEN_CACHE["token"]
-
-    try:
-        client = await get_async_client()
-        resp = await client.post(
-            TOKEN_URL,
-            json={"appId": appid, "clientSecret": secret},
-            timeout=10.0,
-        )
-    except Exception as exc:
-        _LAST_ERROR = f"获取 token 失败: {exc}"
-        return ""
-
-    if resp.status_code != 200:
-        _LAST_ERROR = f"获取 token 失败: HTTP {resp.status_code} {resp.text}"
+        _LAST_ERROR.set("缺少 appid 或 secret")
         return ""
 
     try:
-        data = resp.json()
-    except ValueError:
-        _LAST_ERROR = f"获取 token 失败: 响应不是 JSON - {resp.text}"
+        token = await get_token_manager(appid, secret).get_token()
+    except TokenManagerError as exc:
+        _LAST_ERROR.set(str(exc))
         return ""
 
-    token = data.get("access_token")
-    if not token:
-        _LAST_ERROR = f"获取 token 失败: {data}"
-        return ""
-
-    expires = int(data.get("expires_in", 7000))
-    _TOKEN_CACHE["token"] = token
-    _TOKEN_CACHE["expire"] = now + expires
-    _LAST_ERROR = ""
+    _LAST_ERROR.set("")
     return token
 
 
 def get_last_error() -> str:
-    return _LAST_ERROR
+    return _LAST_ERROR.get()

@@ -17,6 +17,7 @@ default_config_tmpl:
   image_bed_channel_id: "" # QQ 图床子频道 ID（可空）
   bilibili_image_bed_config: {} # B 站图床配置（可空）
   bot_api_base_url: "" # private_bot 业务后端 API 地址（可空）
+  debug_event_log: false # 输出事件类型、字段摘要和解析结果调试日志
   full_group_reply:
     mode: normal # 全量群消息回复模式：normal/random_reply/all_as_at/smart_reply/smart_random
     random_probability: 0.05 # random_reply 模式下纯随机回复概率
@@ -36,6 +37,17 @@ default_config_tmpl:
   new_user_welcome_message: "欢迎第一次和我聊天～" # 首次对话欢迎消息（为空则不发送）
   enable_group_remove_notice: false # 退群提示开关
   enable_friend_remove_notice: false # 删好友提示开关
+  auto_event_log_groups:
+    reaction: true
+    relation: true
+    group_setting: true
+    group_member: true
+    guild: true
+    channel: true
+    guild_member: true
+    message_delete: true
+    audit: true
+    forum: true
   unified_webhook_mode: true # 统一 Webhook 入口模式
   webhook_uuid: "" # Webhook UUID（自动生成）
 
@@ -50,12 +62,14 @@ config_docs:
   image_bed_channel_id: "QQ 图床子频道 ID（可空）"
   bilibili_image_bed_config: "B 站图床配置（可空）"
   bot_api_base_url: "private_bot 业务后端 API 地址（可空）"
+  debug_event_log: "输出事件类型、字段摘要和解析结果调试日志"
   full_group_reply: "全量群消息回复策略：默认 normal 只入库；可选 random_reply、all_as_at、smart_reply、smart_random"
   group_add_robot_message: "机器人自己被拉进群时的欢迎消息（为空则不发送）"
-  group_member_add_message: "普通群成员加入群聊时的欢迎消息（为空则不发送，可用 {user_id}/{group_id}）"
+  group_member_add_message: "普通群成员加入群聊时的欢迎消息（为空则不发送；支持用户、群和操作人 ID 占位符）"
   friend_add_message: "好友添加欢迎消息（为空则不发送）"
   new_user_welcome_message: "首次对话欢迎消息（为空则不发送）"
   enable_group_remove_notice: "退群提示开关"
   enable_friend_remove_notice: "删好友提示开关"
+  auto_event_log_groups: "自动事件日志及插件事件存储分组开关，默认全部开启"
   unified_webhook_mode: "统一 Webhook 入口模式"
   webhook_uuid: "Webhook UUID（自动生成）"

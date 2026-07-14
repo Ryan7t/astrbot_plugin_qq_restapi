@@ -12,6 +12,7 @@ _PLUGIN_CONFIG_KEYS = {
     "markdown_aj_keys",
     "image_bed_channel_id",
     "bilibili_image_bed_config",
+    "bot_api_base_url",
     "debug_event_log",
     "group_add_robot_message",
     "group_member_add_message",
