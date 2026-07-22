@@ -34,6 +34,12 @@ AstrBot 框架内置了基于 `botpy` SDK 的 `qq_official` / `qq_official_webho
 
 ## 安装
 
+### 兼容版本
+
+插件 v0.1.1 要求 **AstrBot v4.26.0 或更高版本**。插件的媒体处理依赖 `MediaResolver`，统一 Webhook 模式依赖 `FastAPIWebhookServer`；这两个框架接口从 AstrBot v4.26.0 开始提供。
+
+如果安装日志出现 `cannot import name 'audio_to_tencent_silk_base64'`，说明实际安装的仍是使用旧音频接口的插件文件，或 AstrBot 升级后存在不同版本框架文件混装。请先在管理面板中完整卸载旧版插件，再安装 v0.1.1；如果 AstrBot 已显示为 v4.26.0 以上但错误仍然存在，请使用 AstrBot 官方升级或重装方式修复框架文件。不要直接修改 AstrBot 框架源码来绕过此问题。
+
 将本仓库克隆到 AstrBot 的插件目录下：
 
 ```bash
@@ -174,7 +180,7 @@ main.py                  ← 插件入口：注册、初始化、指令定义
 │   ├── qq_restapi_webhook_server.py  Webhook 回调处理（FastAPIWebhookServer + Ed25519 验签）
 │   └── ws_client.py                  WebSocket 客户端（心跳/identify/resume）
 ├── core/qq/             ← 复用 runtime 的公共 API 薄兼容层
-├── runtime/             ← 运行时核心（事件解析、消息发送、Token 管理、模板系统）
+├── runtime/             ← 运行时核心（兼容预检、事件解析、消息发送、Token 管理、模板系统）
 ├── db/                  ← 插件自有数据库层（SQLModel + SQLite WAL）
 ├── utils/               ← 工具（场景识别）
 ├── templates/           ← Markdown 模板文件 + registry.yaml

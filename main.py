@@ -7,6 +7,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
+from .runtime.framework_compat import ensure_supported_astrbot
 from .runtime.full_group_reply import FullGroupReplyController
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -81,12 +82,13 @@ if _PRIVATE_BOT_INSTALLED:
         _PRIVATE_BOT_ERROR = exc
 
 
-@register("qq_restapi", "YourName", "QQ 官方 REST API 平台适配器", "0.1.0")
+@register("qq_restapi", "YourName", "QQ 官方 REST API 平台适配器", "0.1.1")
 class QQRestApiPlugin(Star):
     """QQ REST API 平台适配器插件。"""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        ensure_supported_astrbot()
         from .runtime import set_context, set_plugin_config, set_plugin_db
         from .db import QQRestAPIDatabase
 
